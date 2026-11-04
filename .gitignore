@@ -1,0 +1,23 @@
+node_modules/
+dist/
+dist-bin/
+*.tsbuildinfo
+.tsbuildinfo
+
+# Local runtime state — never belongs in the source repo
+.oguri/
+*.log
+
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# IDE — oguri is editor-agnostic; keep local IDE state out of the repo
+.idea/
+*.iml
+.vscode/
+!.vscode/extensions.json
+.tsbuild/
+
+dist-npm/

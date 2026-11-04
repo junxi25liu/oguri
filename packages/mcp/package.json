@@ -1,0 +1,55 @@
+{
+  "name": "@oguri/mcp",
+  "version": "1.0.1",
+  "description": "oguri MCP server: rooms, inbox, messaging, and tasks as MCP tools and resources.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "oguri-mcp": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.tsbuildinfo",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "@oguri/core": "workspace:*",
+    "@oguri/daemon": "workspace:*",
+    "@oguri/protocol": "workspace:*",
+    "@modelcontextprotocol/server": "^2.4.0",
+    "zod": "^4.6.7"
+  },
+  "author": "Alexander (https://github.com/junxi25liu)",
+  "homepage": "https://github.com/junxi25liu/oguri#readme",
+  "bugs": {
+    "url": "https://github.com/junxi25liu/oguri/issues"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "mcp",
+    "git",
+    "messaging",
+    "claude",
+    "cursor",
+    "codex",
+    "model-context-protocol"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/junxi25liu/oguri.git",
+    "directory": "packages/mcp"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

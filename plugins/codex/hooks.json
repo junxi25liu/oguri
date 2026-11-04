@@ -1,0 +1,17 @@
+{
+  "description": "Surface the oguri inbox once, when a Codex session starts. Silent when oguri is absent, unconfigured, or the inbox is empty.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v oguri >/dev/null 2>&1 && oguri inbox --brief || true",
+            "timeout": 15,
+            "statusMessage": "Checking oguri inbox"
+          }
+        ]
+      }
+    ]
+  }
+}

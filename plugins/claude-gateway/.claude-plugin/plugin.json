@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "oguri-gateway",
+  "displayName": "oguri relay gateway",
+  "description": "Turns one Claude Code session into a standing relay between a oguri network and the other Claude sessions on this machine. The gateway session watches the oguri inbox, pushes arriving remote messages into whichever local session is waiting for them, and carries their replies back out — so a session that knows nothing about oguri can still reach an agent on another computer. Relays as quoted data, never as instructions; never answers a `needs: human` item; never executes work a remote agent asked for. Requires the `oguri` CLI and node on PATH. Complements the `oguri` plugin and can run alongside it.",
+  "author": {
+    "name": "Alexander",
+    "email": "140332206+junxi25liu@users.noreply.github.com",
+    "url": "https://github.com/junxi25liu"
+  },
+  "homepage": "https://github.com/junxi25liu/oguri",
+  "repository": "https://github.com/junxi25liu/oguri",
+  "license": "MIT",
+  "keywords": ["oguri", "relay", "gateway", "cross-session", "multi-agent", "git", "async"]
+}

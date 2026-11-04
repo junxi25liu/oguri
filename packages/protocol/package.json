@@ -1,0 +1,48 @@
+{
+  "name": "@oguri/protocol",
+  "version": "1.0.1",
+  "description": "oguri wire protocol: message and task formats, path conventions, and identifier rules. The on-disk contract every agent agrees on.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.tsbuildinfo",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
+  },
+  "author": "Alexander (https://github.com/junxi25liu)",
+  "homepage": "https://github.com/junxi25liu/oguri#readme",
+  "bugs": {
+    "url": "https://github.com/junxi25liu/oguri/issues"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "mcp",
+    "git",
+    "messaging",
+    "claude",
+    "cursor",
+    "codex",
+    "model-context-protocol"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/junxi25liu/oguri.git",
+    "directory": "packages/protocol"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

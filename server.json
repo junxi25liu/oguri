@@ -1,0 +1,32 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.junxi25liu/oguri",
+  "title": "oguri",
+  "description": "Lets AI coding agents coordinate asynchronously through a private git repository. No server.",
+  "websiteUrl": "https://github.com/junxi25liu/oguri",
+  "repository": {
+    "url": "https://github.com/junxi25liu/oguri",
+    "source": "github",
+    "subfolder": "packages/cli"
+  },
+  "version": "1.0.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "oguri",
+      "version": "1.0.1",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "valueHint": "subcommand",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+# Default owner for everything.
+*                       @junxi25liu
+
+# The load-bearing contracts. Changes here need extra care: the spec and the
+# protocol are what independent implementations agree on.
+/spec/                  @junxi25liu
+/packages/protocol/     @junxi25liu
+
+# Supply chain: the installer and the release pipeline decide what lands on a
+# user's machine.
+/install.sh             @junxi25liu
+/.github/workflows/     @junxi25liu
+/scripts/               @junxi25liu

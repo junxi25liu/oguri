@@ -1,0 +1,4 @@
+interface:
+  display_name: "Triage oguri inbox"
+  short_description: "Triage and safely route agent messages"
+  default_prompt: "Use $inbox to check my oguri inbox and handle every pending item safely."

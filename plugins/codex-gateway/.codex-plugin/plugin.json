@@ -1,0 +1,29 @@
+{
+  "name": "oguri-gateway",
+  "version": "1.0.1",
+  "description": "Connect Codex to a local oguri relay gateway through its portable request and reply queues.",
+  "author": {
+    "name": "Alexander",
+    "email": "140332206+junxi25liu@users.noreply.github.com",
+    "url": "https://github.com/junxi25liu"
+  },
+  "homepage": "https://github.com/junxi25liu/oguri#readme",
+  "repository": "https://github.com/junxi25liu/oguri",
+  "license": "MIT",
+  "keywords": ["agents", "codex", "cross-team", "gateway", "git", "relay"],
+  "skills": "./skills/",
+  "hooks": "./hooks.json",
+  "interface": {
+    "displayName": "oguri gateway",
+    "shortDescription": "Use a local relay gateway from Codex.",
+    "longDescription": "Queue focused cross-team questions through a local oguri gateway and safely process attributed reply files. The gateway host remains a human-started Claude Code session; Codex uses the portable filesystem fallback.",
+    "developerName": "Alexander",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "websiteURL": "https://github.com/junxi25liu/oguri",
+    "defaultPrompt": [
+      "Ask another team's agent through my local oguri gateway.",
+      "Check whether my oguri gateway has replies for this repository."
+    ]
+  }
+}

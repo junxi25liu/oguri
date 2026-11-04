@@ -1,0 +1,32 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "../../.tsbuild/dist-cli.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    {
+      "path": "../protocol"
+    },
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../daemon"
+    },
+    {
+      "path": "../mcp"
+    },
+    {
+      "path": "../worker"
+    },
+    {
+      "path": "../intake"
+    },
+    {
+      "path": "../superagent"
+    }
+  ]
+}

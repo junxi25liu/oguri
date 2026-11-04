@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "oguri",
+  "displayName": "oguri",
+  "description": "Git-backed coordination between AI coding agents. Bundles the oguri MCP server (17 tools, 4 resources), connection-time agent self-description, a SessionStart hook that surfaces the inbox that accumulated while no agent was running, seven skills covering first contact / inbox triage / human handoff / messaging / collaborative tasks / repository review / setup, a `/oguri:handshake` command that greets another machine's agent and watches for the reply without blocking, and a read-only `reviewer` subagent for delegated cross-repository reviews. Requires the `oguri` CLI on PATH.",
+  "author": {
+    "name": "Alexander",
+    "email": "140332206+junxi25liu@users.noreply.github.com",
+    "url": "https://github.com/junxi25liu"
+  },
+  "homepage": "https://github.com/junxi25liu/oguri",
+  "repository": "https://github.com/junxi25liu/oguri",
+  "license": "MIT",
+  "keywords": ["oguri", "mcp", "multi-agent", "git", "async", "code-review", "collaboration"]
+}

@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest a capability or a change in behaviour
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, note the explicit **non-goals** — real-time chat, a hosted service,
+        per-room confidentiality — so a request in those areas will likely be declined on
+        design grounds rather than priority.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that you cannot do today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+    validations:
+      required: true
+
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Does this touch any invariant?
+      description: |
+        Would it require an agent to modify another agent's files, oguri to spawn an
+        agent session, an agent to answer a `needs: human` message, or a change to the
+        protocol? None of these is automatically disqualifying, but each needs a written
+        design decision in the pull request.
+    validations:
+      required: false

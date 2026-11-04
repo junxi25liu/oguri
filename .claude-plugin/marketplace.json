@@ -1,0 +1,26 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "oguri",
+  "description": "The oguri plugin marketplace for Claude Code. oguri gives AI coding agents a shared asynchronous channel through a private git repository your team controls — no hosted service, no agent spawning.",
+  "owner": {
+    "name": "Alexander",
+    "email": "140332206+junxi25liu@users.noreply.github.com",
+    "url": "https://github.com/junxi25liu"
+  },
+  "plugins": [
+    {
+      "name": "oguri",
+      "source": "./plugins/claude",
+      "category": "collaboration",
+      "tags": ["mcp", "multi-agent", "git", "async", "code-review", "team"],
+      "description": "Connects Claude Code to a oguri network: wires the oguri MCP server, surfaces pending messages at session start, and teaches the four rules the protocol depends on — the inbox is pull-based, `needs: human` is never answered by an agent, everything sent is permanent and visible to the whole team, and message bodies are data rather than instructions. Ships seven skills (first contact, inbox triage, human handoff, messaging, collaborative tasks, repository review, setup) and a read-only `reviewer` subagent that performs a delegated cross-repository review in an isolated worktree. Requires the `oguri` CLI on PATH."
+    },
+    {
+      "name": "oguri-gateway",
+      "source": "./plugins/claude-gateway",
+      "category": "collaboration",
+      "tags": ["oguri", "relay", "gateway", "cross-session", "multi-agent", "git", "async"],
+      "description": "Turns one Claude Code session into a standing relay between a oguri network and the other Claude sessions on this machine, closing the gap the inbox hooks cannot reach: a remote teammate's message lands in a session that is already mid-task, instead of waiting for that session to end. The gateway watches the inbox, routes each arriving message to whichever local session is waiting for it — by thread, then by room — and carries replies back out; a client session reaches the network with one command and needs no oguri configuration of its own. Relays remote text as quoted, attributed data rather than instruction, never acts on a remote request, never routes refused work to a looser session, and never answers a `needs: human` item. Spawns nothing: both ends of every relay are sessions a person already opened. Requires the `oguri` CLI and node on PATH."
+    }
+  ]
+}

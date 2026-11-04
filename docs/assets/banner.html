@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>oguri banner</title>
+    <style>
+      :root {
+        --bg: #07090d;
+        --ink: #f0f6fc;
+        --soft: #b9c3cd;
+        --muted: #7d8590;
+        --green: #3fb950;
+        --mint: #7ee787;
+        --cyan: #56d4dd;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+      }
+      html,
+      body {
+        width: 1280px;
+        height: 400px;
+      }
+      body {
+        background: var(--bg);
+        color: var(--ink);
+        font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, "PingFang SC", monospace;
+        overflow: hidden;
+        position: relative;
+      }
+
+      /* a spotlight behind the wordmark */
+      .spot {
+        position: absolute;
+        left: 50%;
+        top: -120px;
+        width: 1100px;
+        height: 560px;
+        transform: translateX(-50%);
+        background: radial-gradient(
+          closest-side,
+          rgba(63, 185, 80, 0.3),
+          rgba(63, 185, 80, 0.08) 55%,
+          transparent 100%
+        );
+        filter: blur(10px);
+      }
+      .spot2 {
+        position: absolute;
+        left: 50%;
+        top: 60px;
+        width: 620px;
+        height: 240px;
+        transform: translateX(-50%);
+        background: radial-gradient(closest-side, rgba(86, 212, 221, 0.16), transparent 100%);
+      }
+
+      /* a perspective floor that runs to the horizon */
+      .floor {
+        position: absolute;
+        left: -20%;
+        right: -20%;
+        bottom: -200px;
+        height: 330px;
+        transform: perspective(380px) rotateX(62deg);
+        transform-origin: 50% 0%;
+        background-image:
+          linear-gradient(rgba(126, 231, 135, 0.34) 1.4px, transparent 1.4px),
+          linear-gradient(90deg, rgba(126, 231, 135, 0.34) 1.4px, transparent 1.4px);
+        background-size: 64px 64px;
+        mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.6) 0%, #000 40%, #000 100%);
+      }
+      .horizon {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 270px;
+        height: 1.5px;
+        background: linear-gradient(
+          90deg,
+          transparent 5%,
+          rgba(126, 231, 135, 0.95) 50%,
+          transparent 95%
+        );
+        box-shadow: 0 0 30px 5px rgba(63, 185, 80, 0.5);
+      }
+      .fade {
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(1000px 300px at 50% 120%, transparent 30%, var(--bg) 85%);
+      }
+      .vignette {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(
+          90deg,
+          var(--bg) 0%,
+          transparent 18%,
+          transparent 82%,
+          var(--bg) 100%
+        );
+      }
+
+      .hero {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 46px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+      }
+      h1 {
+        font-size: 128px;
+        font-weight: 800;
+        letter-spacing: -6px;
+        line-height: 1.05;
+        background: linear-gradient(180deg, #ffffff 0%, #ffffff 55%, #d7e4dc 100%);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        filter: drop-shadow(0 0 34px rgba(63, 185, 80, 0.45))
+          drop-shadow(0 2px 0 rgba(0, 0, 0, 0.4));
+      }
+      h1 span {
+        -webkit-text-fill-color: var(--green);
+      }
+      .tag {
+        margin-top: 6px;
+        font-size: 26px;
+        color: var(--soft);
+        letter-spacing: -0.3px;
+      }
+      .tag b {
+        color: var(--ink);
+      }
+      .cmd {
+        margin-top: 26px;
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 18px;
+        color: var(--ink);
+        background: rgba(7, 9, 13, 0.82);
+        border: 1px solid rgba(126, 231, 135, 0.35);
+        border-radius: 12px;
+        padding: 11px 20px;
+        box-shadow:
+          0 0 0 5px rgba(63, 185, 80, 0.07),
+          0 0 40px rgba(63, 185, 80, 0.22);
+      }
+      .cmd .p {
+        color: var(--green);
+      }
+      .cmd .s {
+        color: #a5d6ff;
+      }
+      .caret {
+        display: inline-block;
+        width: 10px;
+        height: 20px;
+        background: var(--mint);
+        box-shadow: 0 0 10px var(--mint);
+        margin-left: -4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="spot"></div>
+    <div class="floor"></div>
+    <div class="fade"></div>
+    <div class="horizon"></div>
+    <div class="spot2"></div>
+    <div class="vignette"></div>
+
+    <div class="hero">
+      <h1>oguri<span>.</span></h1>
+      <p class="tag">Talk to one agent. <b>It runs every machine you own.</b></p>
+      <div class="cmd">
+        <span class="p">$</span> npm i -g <span class="s">oguri</span><span class="caret"></span>
+      </div>
+    </div>
+  </body>
+</html>

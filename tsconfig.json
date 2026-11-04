@@ -1,0 +1,29 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/protocol"
+    },
+    {
+      "path": "./packages/core"
+    },
+    {
+      "path": "./packages/daemon"
+    },
+    {
+      "path": "./packages/mcp"
+    },
+    {
+      "path": "./packages/worker"
+    },
+    {
+      "path": "./packages/intake"
+    },
+    {
+      "path": "./packages/superagent"
+    },
+    {
+      "path": "./packages/cli"
+    }
+  ]
+}

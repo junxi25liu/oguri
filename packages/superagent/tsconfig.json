@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "../../.tsbuild/dist-superagent.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    {
+      "path": "../protocol"
+    },
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../daemon"
+    },
+    {
+      "path": "../intake"
+    }
+  ]
+}

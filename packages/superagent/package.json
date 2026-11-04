@@ -1,0 +1,48 @@
+{
+  "name": "@oguri/superagent",
+  "version": "1.0.1",
+  "description": "oguri superagent: the big superagent routes what people ask to the right machine, and a small superagent on each machine watches its work and reports back.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.tsbuildinfo",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "@oguri/core": "workspace:*",
+    "@oguri/daemon": "workspace:*",
+    "@oguri/intake": "workspace:*",
+    "@oguri/protocol": "workspace:*"
+  },
+  "author": "Alexander (https://github.com/junxi25liu)",
+  "homepage": "https://github.com/junxi25liu/oguri#readme",
+  "bugs": {
+    "url": "https://github.com/junxi25liu/oguri/issues"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "git",
+    "router",
+    "orchestrator",
+    "superagent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/junxi25liu/oguri.git",
+    "directory": "packages/superagent"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

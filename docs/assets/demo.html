@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>oguri demo</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+      }
+      html,
+      body {
+        width: 1100px;
+        height: 590px;
+        background: transparent;
+      }
+      body {
+        font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+        padding: 4px 4px 28px;
+      }
+      .win {
+        height: 100%;
+        border-radius: 14px;
+        overflow: hidden;
+        background: #0d1117;
+        border: 1px solid #30363d;
+        box-shadow: 0 14px 28px rgba(1, 4, 9, 0.45);
+      }
+      .bar {
+        height: 40px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 16px;
+        background: #161b22;
+        border-bottom: 1px solid #30363d;
+      }
+      .dot {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+      }
+      .title {
+        margin-left: 14px;
+        color: #8b949e;
+        font-size: 13px;
+      }
+      pre {
+        padding: 22px 26px;
+        font: inherit;
+        font-size: 15.5px;
+        line-height: 1.62;
+        color: #c9d1d9;
+        white-space: pre;
+      }
+      .p {
+        color: #3fb950;
+      }
+      .cmd {
+        color: #e6edf3;
+        font-weight: 600;
+      }
+      .str {
+        color: #a5d6ff;
+      }
+      .who {
+        color: #7ee787;
+        font-weight: 700;
+      }
+      .dim {
+        color: #6e7681;
+      }
+      .ok {
+        color: #3fb950;
+      }
+      .ask {
+        color: #d29922;
+      }
+      .id {
+        color: #d2a8ff;
+      }
+      .m {
+        color: #79c0ff;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="win">
+      <div class="bar">
+        <span class="dot" style="background: #ff5f57"></span>
+        <span class="dot" style="background: #febc2e"></span>
+        <span class="dot" style="background: #28c840"></span>
+        <span class="title">~/code/app — oguri</span>
+      </div>
+      <pre><span class="p">❯</span> <span class="cmd">oguri big</span> <span class="str">"add a retry to the refund client, and run the load test on the GPU box"</span>
+
+<span class="who">big</span>  On it, two workers:
+     - Add a retry to the refund client <span class="dim">(task</span> <span class="id">7KQ2MD</span><span class="dim">)</span>   on <span class="m">mac-mini</span>
+     - Run the load test <span class="dim">(task</span> <span class="id">7KQ2NB</span><span class="dim">)</span>                  on <span class="m">gpu-box</span>
+
+<span class="p">❯</span> <span class="cmd">oguri big</span> <span class="str">"cap the retries at 3"</span>
+<span class="who">big</span>  Passed to the worker on Add a retry to the refund client <span class="dim">(task</span> <span class="id">7KQ2MD</span><span class="dim">)</span>.
+
+<span class="who">big</span>  <span class="ok">Done:</span> Add a retry to the refund client
+     Exponential backoff, at most 3 tries. Branch oguri/7KQ2MD, <span class="m">PR #42</span>.
+<span class="who">big</span>  <span class="ask">Waiting on you:</span> Run the load test
+     Which dataset: the 10k sample or the full 2M?
+
+<span class="p">❯</span> <span class="cmd">oguri superagent status</span>
+  <span class="ask">waiting on you</span>  7KQ2NB  Run the load test                  <span class="dim">2m</span>
+  <span class="ok">done</span>            7KQ2MD  Add a retry to the refund client   <span class="dim">6m</span>
+  today           2 worker run(s) · $0.41</pre>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,192 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdtemp, rename, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { after, before, describe, it } from "node:test";
+
+import { defaultIdentity } from "../src/config.ts";
+import { Layout } from "../src/layout.ts";
+import { Network } from "../src/network.ts";
+
+const exec = promisify(execFile);
+
+process.env["GIT_AUTHOR_NAME"] = "oguri test";
+process.env["GIT_AUTHOR_EMAIL"] = "test@oguri.invalid";
+process.env["GIT_COMMITTER_NAME"] = "oguri test";
+process.env["GIT_COMMITTER_EMAIL"] = "test@oguri.invalid";
+
+/** Small on purpose: the mechanism is what matters, not the number. */
+const BUDGET = 4;
+
+describe("thread pressure integration", () => {
+  let tmp: string;
+  let remote: string;
+  let network: Network;
+
+  before(async () => {
+    tmp = await mkdtemp(join(tmpdir(), "oguri-pressure-"));
+    remote = join(tmp, "transport.git");
+    await exec("git", ["init", "--bare", "--quiet", "--initial-branch=main", remote]);
+    const init = await Network.init({
+      layout: new Layout(join(tmp, "home")),
+      networkId: "acme",
+      remote,
+      identity: defaultIdentity({ id: "alice-codex" }),
+    });
+    network = init.network;
+    // Budget set explicitly, not inherited from DEFAULT_ROOM_POLICY. This test
+    // is about the mechanism — the last allowed reply parks, a human relay
+    // resets it — and coupling it to whatever the default happens to be made it
+    // fail when the default was relaxed, which is not a change in behaviour.
+    await network.createRoom("shared-branch", { replyBudget: BUDGET });
+  });
+
+  after(async () => {
+    network.close();
+    await rm(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+
+  it("preserves card capabilities across presence-only transitions", async () => {
+    await network.publishAgentCard({ expertise: ["typescript"], speaksFor: ["oguri/core"] });
+    await network.publishAgentCard({ presence: "live" });
+    const card = (await network.listAgents()).find((candidate) => candidate.id === "alice-codex");
+    assert.deepEqual(card?.expertise, ["typescript"]);
+    assert.deepEqual(card?.speaksFor, ["oguri/core"]);
+    assert.equal(card?.presence.status, "live");
+  });
+
+  it("writes nothing when an attached session announces itself again", async () => {
+    // A session that re-announces has told the network nothing new. Committing
+    // for it puts a commit and a push on `main` per announcement — the branch
+    // that is meant to stay cold — so the second call must be a no-op.
+    const first = await network.announce("live", { session: "session-a" });
+    assert.equal(first, true, "the first announcement is a real transition");
+    assert.equal(
+      await network.announce("live", { session: "session-a" }),
+      false,
+      "re-announcing an attached session must not write to main",
+    );
+    // Left attached on purpose: the next test needs a live card to turn away.
+  });
+
+  it("drains a presence commit left local by an outage", async () => {
+    await rename(remote, `${remote}.away`);
+    try {
+      await assert.rejects(() => network.publishAgentCard({ presence: "away" }));
+    } finally {
+      await rename(`${remote}.away`, remote);
+    }
+
+    await network.sync();
+    const { stdout } = await exec(
+      "git",
+      ["--git-dir", remote, "show", "main:agents/alice-codex.yaml"],
+      { encoding: "utf8" },
+    );
+    assert.match(stdout, /presence:\n\s+status: away/);
+  });
+
+  it("refuses the reply that would exceed the budget, rather than escalating it", async () => {
+    let last = await network.send("shared-branch", { body: "root" });
+    for (let index = 1; index < BUDGET - 1; index += 1) {
+      last = await network.send("shared-branch", {
+        body: `agent reply ${String(index)}`,
+        inReplyTo: last.header.id,
+      });
+      assert.equal(last.header.needs, "none", "ordinary replies stay ordinary");
+    }
+
+    // The budget is a local decision to stop talking. It must NOT spend
+    // `needs: human` — the marker that means a person must decide — on a
+    // conversation whose only sin is length, and it must not write anything
+    // permanent to say so.
+    const refusal = await network
+      .send("shared-branch", { body: "one reply too many", inReplyTo: last.header.id })
+      .then(() => null)
+      .catch((error: unknown) => error);
+    assert.ok(refusal instanceof Error && /reply budget/.test(refusal.message));
+    assert.equal((refusal as { code?: string }).code, "REPLY_BUDGET_EXCEEDED");
+    assert.match(refusal.message, /Do not open a new thread/);
+
+    // Nothing about the refusal reached the shared log.
+    const written = await network.read("shared-branch", { thread: last.header.thread });
+    assert.ok(
+      written.every((m) => m.header.needs !== "human"),
+      "the budget must never put a needs:human message on the wire",
+    );
+    assert.ok(written.every((m) => !m.header.tags.includes("reply-budget")));
+
+    // One human message in the SAME thread refills it, and work continues in place.
+    const human = await network.send("shared-branch", {
+      body: "declared human direction",
+      inReplyTo: last.header.id,
+      authorKind: "human",
+    });
+    const resumed = await network.send("shared-branch", {
+      body: "resuming after direction",
+      inReplyTo: human.header.id,
+    });
+    assert.equal(resumed.header.needs, "none");
+    assert.equal(resumed.header.thread, last.header.thread, "resumed in place, not a new thread");
+  });
+
+  it("exempts discussion on an unfinished task, and resumes the budget once it is done", async () => {
+    await network.createRoom("long-work", { replyBudget: BUDGET });
+    const created = await network.createTask("long-work", {
+      title: "Carry the migration",
+      definition: "Move refunds onto the new ledger.",
+    });
+    const taskId = created.header.task?.id as string;
+    await network.claimTask("long-work", taskId, "Taking this.");
+    await network.updateTask("long-work", taskId, { action: "started", body: "Started." });
+
+    // Well past the budget. Long-running work generates far more back-and-forth
+    // than four messages, and splitting it into fresh threads to escape the
+    // budget is the failure this exemption removes.
+    let last = created;
+    for (let index = 0; index < BUDGET + 3; index += 1) {
+      last = await network.send("long-work", {
+        body: `working note ${String(index)}`,
+        inReplyTo: last.header.id,
+      });
+      assert.equal(
+        last.header.needs,
+        "none",
+        `note ${String(index)} on an unfinished task must not park for a person`,
+      );
+      assert.ok(!last.header.tags.includes("reply-budget"));
+    }
+
+    // The exemption is scoped to the task being unfinished — not to the thread
+    // having ever carried one. Completing it hands the bound back to the budget.
+    await network.updateTask("long-work", taskId, { action: "completed", body: "Landed." });
+    await assert.rejects(
+      network.send("long-work", { body: "one more thought", inReplyTo: last.header.id }),
+      /reply budget/,
+      "a finished task hands the thread back to the budget",
+    );
+  });
+
+  it("does not park an ordinary agent exchange", async () => {
+    // The point of relaxing the default: a real two-agent thread — question,
+    // answer, clarification, answer, refinement, answer — is six messages, and
+    // used to park exactly there. A marker that fires on ordinary work stops
+    // meaning anything, and every parked thread costs a person's time.
+    await network.createRoom("ordinary");
+    let last = await network.send("ordinary", { body: "question" });
+    for (let index = 1; index < 6; index += 1) {
+      last = await network.send("ordinary", {
+        body: `exchange ${String(index)}`,
+        inReplyTo: last.header.id,
+      });
+      assert.equal(
+        last.header.needs,
+        "none",
+        `message ${String(index)} of an ordinary exchange must not park for a person`,
+      );
+    }
+    assert.ok(!last.header.tags.includes("reply-budget"));
+  });
+});

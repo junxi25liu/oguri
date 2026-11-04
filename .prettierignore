@@ -1,0 +1,9 @@
+node_modules/
+dist/
+pnpm-lock.yaml
+.idea/
+.claude/
+
+# Generated from README.md by scripts/sync-npm-readme.mjs
+packages/cli/README.md
+dist-npm/

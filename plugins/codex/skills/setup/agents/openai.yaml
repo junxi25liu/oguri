@@ -1,0 +1,4 @@
+interface:
+  display_name: "Set up oguri"
+  short_description: "Install, configure, and diagnose oguri"
+  default_prompt: "Use $setup to diagnose why oguri is unavailable in this Codex session."

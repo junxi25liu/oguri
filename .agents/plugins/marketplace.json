@@ -1,0 +1,32 @@
+{
+  "name": "oguri",
+  "interface": {
+    "displayName": "oguri"
+  },
+  "plugins": [
+    {
+      "name": "oguri",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "oguri-gateway",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-gateway"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
