@@ -149,15 +149,24 @@ describe("oguri worker, end to end", () => {
       ),
     );
     // Two tasks are ready, and a claim can lose a push race with the first
-    // run's own progress; the next pass takes it. Pass until both have run.
+    // run's own progress; the next pass takes it. A run is recorded on bob's
+    // machine before its completion reaches the transport, so wait for what
+    // the requester sees, not for bob's local record. Pass until both hold.
     const completedRuns = async (): Promise<number> =>
       parseJson<{ outcome: string }[]>(await bob("worker", "runs", "--json")).filter(
         (r) => r.outcome === "completed",
       ).length;
-    for (let i = 0; i < 5; i += 1) {
+    const stateSeenByAlice = async (): Promise<string> => {
+      assert.equal((await alice("sync")).code, 0);
+      return parseJson<{ task: { state: string } }>(
+        await alice("task", "show", "ops", created.task.id, "--json"),
+      ).task.state;
+    };
+    for (let i = 0; i < 8; i += 1) {
       const run = await bob("worker", "start", "--once");
       assert.equal(run.code, 0, run.stderr);
-      if ((await completedRuns()) >= 2) break;
+      assert.equal((await bob("sync")).code, 0);
+      if ((await completedRuns()) >= 2 && (await stateSeenByAlice()) === "completed") break;
     }
 
     assert.equal((await alice("sync")).code, 0);
