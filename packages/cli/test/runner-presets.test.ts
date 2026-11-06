@@ -71,19 +71,14 @@ describe("the printed runner presets", () => {
       assert.doesNotMatch(line, /^\s+model:/, `a model: key would not parse: ${line}`);
     }
     // The model is named in argv instead, where the parser already accepts it.
-    const dsk = RUNNER_PRESETS.find((preset) => preset.name === "dsk");
-    assert.deepEqual(dsk?.runner.argv.slice(0, 4), [
-      "claude",
-      "-p",
-      "--model",
-      "deepseek-v4.1-flash",
-    ]);
+    const cheap = RUNNER_PRESETS.find((preset) => preset.name === "cheap");
+    assert.deepEqual(cheap?.runner.argv.slice(0, 4), ["claude", "-p", "--model", "my-cheap-model"]);
   });
 
   it("covers the runners the task named: live claude, claude-json, codex exec, cheap, brain", () => {
     assert.deepEqual(
       [...PRESET_NAMES],
-      ["claude-live", "claude-json", "codex-exec", "dsk", "brain", "brain-lite"],
+      ["claude-live", "claude-json", "codex-exec", "cheap", "brain", "brain-lite"],
     );
     const byName = new Map(RUNNER_PRESETS.map((preset) => [preset.name, preset.runner]));
     assert.equal(byName.get("claude-live")?.session, "claude-stream");
@@ -121,8 +116,8 @@ describe("oguri runner presets", () => {
     const result = await oguri("runner", "presets");
     assert.equal(result.code, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /^worker:$/m);
-    assert.match(result.stdout, /^ {4}dsk:$/m);
-    assert.match(result.stdout, /deepseek-v4\.1-flash/);
+    assert.match(result.stdout, /^ {4}cheap:$/m);
+    assert.match(result.stdout, /my-cheap-model/);
     assert.match(result.stdout, /--tools=/);
     // It prints; it never edits the machine's policy.
     await assert.rejects(() => stat(join(home, "policy.yaml")), { code: "ENOENT" });

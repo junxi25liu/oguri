@@ -19,7 +19,7 @@ import {
   withDefaultTarget,
   type PlanWriter,
 } from "@oguri/core";
-import type { Backend } from "@oguri/daemon";
+import { RunScopeError, runOf, type Backend } from "@oguri/daemon";
 import type { Message } from "@oguri/protocol";
 
 type TextResult = { content: { type: "text"; text: string }[] };
@@ -43,6 +43,13 @@ function currentTask(
 ): { room: string; taskId: string } {
   const resolvedRoom = room ?? env["OGURI_TASK_ROOM"];
   const resolvedTask = taskId ?? env["OGURI_TASK_ID"];
+  // These actions speak for the task they name, and a run speaks only for its own (ADR 0036).
+  const run = runOf(env);
+  if (run !== null && (resolvedTask !== run.taskId || resolvedRoom !== run.room)) {
+    throw new RunScopeError(
+      `this action is about the run's own task ${run.taskId} in ${String(run.room)}; omit taskId and room`,
+    );
+  }
   if (resolvedRoom === undefined || resolvedRoom.length === 0) {
     throw new Error("no room: pass `room`, or run inside a worker run (OGURI_TASK_ROOM is unset)");
   }
@@ -54,7 +61,16 @@ function currentTask(
 
 /** How long `task_ask` may wait for an answer, polling the inbox. */
 const MAX_WAIT_SEC = 3600;
+const WORKER_WAIT_SEC = 60;
 const POLL_SEC = 30;
+const WORKER_ASK_NOTE =
+  "ask 已发出；要等答复的话，写好 result.json 的 needsHuman 后结束本次运行，答复会作为 follow-up 回来";
+
+/** True when oguri's worker handed this session a task in its environment. */
+export function inWorkerRun(env: NodeJS.ProcessEnv = process.env): boolean {
+  const task = env["OGURI_TASK_ID"];
+  return task !== undefined && task !== "";
+}
 
 interface ThreadItem {
   id: string;
@@ -111,9 +127,11 @@ export async function taskAsk(
   });
   const questionId = sent.header.id;
   const thread = sent.header.thread ?? questionId;
-  const limit = Math.min(input.waitSec ?? 0, MAX_WAIT_SEC);
+  const worker = inWorkerRun(env);
+  const guidance = worker ? { guidance: WORKER_ASK_NOTE } : {};
+  const limit = Math.min(input.waitSec ?? 0, worker ? WORKER_WAIT_SEC : MAX_WAIT_SEC);
   if (limit === 0) {
-    return text({ asked: questionId, thread, answered: false, note: "not waiting" });
+    return text({ asked: questionId, thread, answered: false, note: "not waiting", ...guidance });
   }
 
   const deadline = Date.now() + limit * 1000;
@@ -124,7 +142,7 @@ export async function taskAsk(
     });
     const reply = result.items.find((item) => item.id !== questionId);
     if (reply !== undefined) {
-      return text({ asked: questionId, thread, answered: true, reply });
+      return text({ asked: questionId, thread, answered: true, reply, ...guidance });
     }
   }
   return text({
@@ -132,10 +150,18 @@ export async function taskAsk(
     thread,
     answered: false,
     note: `no reply within ${String(limit)}s; this is not an answer. Continue, and state what you assumed.`,
+    ...guidance,
   });
 }
 
-/** `plan`: validate a plan a live agent wrote, then create it. Nothing is written if it fails. */
+/**
+ * `plan`: validate a plan a live agent wrote, then create it. Nothing is written if it fails.
+ *
+ * Inside a worker's run the steps always go under the run's own task, so the
+ * run exits as `progressed` and the roll-up completes the task with them. The
+ * depth check runs once up front, because every step has the same parent and a
+ * refusal must not read as a plan that stopped partway.
+ */
 export async function taskPlanCreate(
   backend: Backend,
   input: {
@@ -149,18 +175,18 @@ export async function taskPlanCreate(
     const checked = withDefaultTarget(validatePlan(input.plan), input.defaultTarget);
     const secrets = planSecretProblems(checked, input.goal ?? checked.title);
     if (secrets.length > 0) throw new PlanError(secrets);
+    const scope = backend.runScope;
+    await scope?.assertCreate(input.room, undefined);
     const writer: PlanWriter = {
       createTask: async (room, taskInput) =>
         await backend.call<Message>("taskCreate", { room, input: taskInput }),
       claimTask: async (room, id, body) =>
         await backend.call<Message>("taskClaim", { room, taskId: id, body }),
     };
-    const created = await createPlanTasks(
-      writer,
-      input.room,
-      checked,
-      input.goal === undefined ? {} : { goal: input.goal },
-    );
+    const created = await createPlanTasks(writer, input.room, checked, {
+      ...(input.goal === undefined ? {} : { goal: input.goal }),
+      ...(scope === undefined ? {} : { parent: scope.taskId }),
+    });
     return text(created);
   } catch (error) {
     if (error instanceof PlanError) {

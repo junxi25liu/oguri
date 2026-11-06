@@ -42,7 +42,8 @@ export async function runStdioServer(options: RunStdioOptions = {}): Promise<voi
     session: true,
   });
 
-  if (project !== null) {
+  // A worker's run does not describe the agent, whichever project it runs in.
+  if (project !== null && backend.runScope === undefined) {
     await backend
       .call("profileUpdate", { input: { role: project.role } })
       .catch((error) =>

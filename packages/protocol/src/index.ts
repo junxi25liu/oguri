@@ -57,6 +57,8 @@ export {
   assertInitialTask,
   assertTaskTransition,
   assertDependenciesMet,
+  assertNoDependencyCycle,
+  findDependencyCycle,
   hasTaskAttemptsLeft,
   isTaskCapability,
   nextTaskAttempt,

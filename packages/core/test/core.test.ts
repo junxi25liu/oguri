@@ -468,7 +468,7 @@ describe("secret scanner", () => {
       ["AKIAIOSFODNN7EXAMPLE", "aws-access-key-id"],
       [`ghp_${"a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8".slice(0, 36)}`, "github-token"],
       ["-----BEGIN OPENSSH PRIVATE KEY-----", "private-key-block"],
-      ["postgres://svc:8Jd0aQ2mZk91@db.internal:5432/app", "connection-string-password"],
+      ["postgres://svc:8Jd0aQ2mZk91@db.example.com:5432/app", "connection-string-password"],
       ["xoxb-1234567890-abcdefghijkl", "slack-token"],
     ];
     for (const [text, rule] of cases) {

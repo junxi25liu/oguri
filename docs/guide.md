@@ -3,8 +3,9 @@
 **English** | [简体中文](zh-CN/guide.md)
 
 This guide covers every oguri feature with working commands. Start with the
-[README](../README.md) for the five-minute path, and the [Quickstart](quickstart.md) for transport
-choices, editor setup, an FAQ, and troubleshooting.
+[README](../README.md) for the five-minute path, the [Deployment guide](deploy.md) to put oguri
+on a new machine and set up workers and superagents from zero, and the [Quickstart](quickstart.md)
+for transport choices, editor setup, an FAQ, and troubleshooting.
 
 ## Contents
 
@@ -14,12 +15,13 @@ choices, editor setup, an FAQ, and troubleshooting.
 4. [Let a machine run the work it is sent](#4-let-a-machine-run-the-work-it-is-sent)
 5. [Take requests from a team chat](#5-take-requests-from-a-team-chat)
 6. [One superagent for all your machines](#6-one-superagent-for-all-your-machines)
-7. [Assign a goal to several machines](#7-assign-a-goal-to-several-machines)
-8. [Notifications and the dashboard](#8-notifications-and-the-dashboard)
-9. [Several networks and project roles](#9-several-networks-and-project-roles)
-10. [Delegate a repository review](#10-delegate-a-repository-review)
-11. [Integration surfaces](#11-integration-surfaces)
-12. [How it works](#12-how-it-works)
+7. [Talk to a superagent interactively](#7-talk-to-a-superagent-interactively)
+8. [Assign a goal to several machines](#8-assign-a-goal-to-several-machines)
+9. [Notifications and the dashboard](#9-notifications-and-the-dashboard)
+10. [Several networks and project roles](#10-several-networks-and-project-roles)
+11. [Delegate a repository review](#11-delegate-a-repository-review)
+12. [Integration surfaces](#12-integration-surfaces)
+13. [How it works](#13-how-it-works)
 
 ## 1. Agents talk to each other
 
@@ -286,6 +288,8 @@ The worker claims a task, pipes its body to the runner's stdin, and completes or
 summary. Runners are argv with no shell, and a task can only choose among them with a first line
 `runner: <name>`. Requesters outside `trustedRequesters` still wait for `oguri task approve`.
 Concurrency, an hourly cap, and a timeout bound every run, and the hourly cap survives a restart.
+A run may take up to `worker.timeoutMinutes` (default 180, 1 to 1440); a config that sets it keeps
+its value.
 
 A runner can also be a mapping. `worktree: true` runs every task in a fresh git worktree of the
 runner's `workdir`, on a branch `oguri/<task-id>-<run-id>`, so concurrent runs never share a
@@ -310,10 +314,15 @@ while attempts remain; this machine waits `retry.backoffMinutes` before it takes
 last failure blocks it for a person.
 
 A run may write `$OGURI_RESULT_FILE` (`result.json` in its run directory) with a `summary`, and
-optionally a `branch`, `pr`, `artifacts`, or a `needsHuman` question. The summary replaces the
-output tail, and the rest become message refs. When every subtask of a parent the worker holds has
-completed, the worker completes the parent with a roll-up; `oguri task rollup <room> <id>` does the
-same by hand.
+optionally a `branch`, `artifacts`, or a `needsHuman` question; `pr` belongs there only when the run
+opened a pull request. The summary replaces the output tail, and the rest become message refs. A
+file that is rejected — an unknown key, a `pr` that is not an `https://` URL, an empty value where
+one is required — publishes nothing, and an exit code of 0 does not complete the task: the run is
+released or blocked with the reason, like a failed one. A run that exits 0 and writes no file
+still completes, and the report says `no result.json was written`; set `requireResult: true` on a
+runner that follows this protocol and such a run is released or blocked instead. When every
+subtask of a parent the worker holds has completed, the worker completes the parent with a roll-up;
+`oguri task rollup <room> <id>` does the same by hand.
 
 A runner can keep one agent session per task. `session` says where the run's session id comes
 from, and `resume` is the argv that continues it, with `{session}` once:
@@ -452,16 +461,16 @@ superagent:
 superagent:
   small:
     enabled: true
-    big: liu-big # the big superagent's agent id: its workers need no approval here
+    big: alice-big # the big superagent's agent id: its workers need no approval here
     # runner: brain         what it thinks with when you talk to it directly
-    # maxWorkers: 3         how many workers it may run here at once (1 to 16)
+    # maxWorkers: 3         how many workers it may run here at once (1 to 20)
     # quietMinutes: 30      report a worker with no update for this long
 ```
 
 Run `oguri superagent start` on each machine. It runs the roles its policy turns on: the worker
 engine and the small superagent, and the big superagent.
 
-On one machine, give the big superagent its own identity with `oguri agent add liu-big`, or run
+On one machine, give the big superagent its own identity with `oguri agent add alice-big`, or run
 both roles as the same agent. Both work: a worker accepts messages relayed by its own identity.
 
 ### Talk to it
@@ -515,9 +524,10 @@ How it keeps the session depends on the runner:
 | `session: claude-json` or `codex-jsonl`, with `resume` | One process per turn, each resuming the last         |
 | no `session`                                           | One call per request with everything in it           |
 
-The session's id is kept in `~/.oguri/superagent/`. It starts afresh when the rules change,
-after 60 turns, or when a resume is refused. Messages that arrive together in one conversation
-are decided once. When the model does not answer, the request is tried again on the next pass,
+The session's id is kept in `~/.oguri/superagent/`. It starts afresh when the rules change
+or when a resume is refused, never just because of its turn count. Long-context compaction
+belongs to the runner. Messages that arrive together in one conversation are decided once.
+When the model does not answer, the request is tried again on the next pass,
 twice, before you are told nothing was started. The session's memory grants nothing: every
 turn carries the current record, and code checks every decision against it.
 
@@ -554,6 +564,21 @@ Every `claude` or `codex` worker gets oguri's tools without setup: it can report
 you a question, and hand work back. Set `oguriTools: false` on a runner to keep its argv exactly
 as written.
 
+### Tiers and runner grants
+
+Group runners into rungs with `worker.tiers`, cheapest first, and the superagents choose a rung
+by difficulty and write `tier:` and `tier-reason:` lines on the task. A failed run of a tiered task
+moves one rung up, at most `worker.escalation.maxSteps` times. A task pinned to a `runner:` never
+moves. A person's follow-up may set its own `effort:` for that run, checked against the runner's
+`efforts`.
+
+Runner grants make a person say yes to each runner. `oguri runner grant <name>` binds the grant
+to the runner entry as it is now and needs an interactive terminal; `oguri runner revoke <name>`
+takes effect on the worker's next pass; `oguri runner request <name> "<why>"` lets an agent ask
+without granting anything; `oguri runner list` shows the state. Every action is appended to
+`runner-audit.jsonl`. Grants are off until the first grant. The [deployment guide](deploy.md#44-tiers-cheap-first-climb-on-failure)
+has the full configuration.
+
 ### What code checks
 
 The model sees the machines, their agents, and the workers, and replies with one JSON decision.
@@ -568,7 +593,41 @@ deploys runs there, and it cannot move work elsewhere. Workers run only the comm
 Anyone who can push to the transport repository can write to the big superagent. Keep the
 repository private to your own machines.
 
-## 7. Assign a goal to several machines
+## 7. Talk to a superagent interactively
+
+`oguri chat` opens a continuous terminal conversation with the big superagent. It uses the same
+room and message tags as `oguri big`, so nothing here is a proxy or a fake chat stream:
+
+```console
+oguri chat
+oguri chat --target small-1              # a small superagent by agent id
+oguri chat --target machine:machine-a    # the only agent on that machine
+```
+
+The prompt names the current target. Type a message and press Enter; use `/targets`, `/target <name>`,
+`/history`, `/help`, and `/exit`. `/target` keeps each target's conversation separate. A Chinese
+message needs no quoting beyond the shell's usual rules. `//` sends a literal leading slash, Ctrl-D
+and `/exit` leave only this terminal, and Ctrl-C interrupts a wait without stopping a superagent or
+worker. Late replies stay in the immutable conversation; `/history` re-reads them. A timeout is a
+hint to check that `oguri superagent start` is running, never an automatic resend.
+
+While `oguri web` is running, the dedicated page is `/chat`:
+
+```text
+http://127.0.0.1:7380/chat?target=big
+http://127.0.0.1:7380/chat?target=machine%3Amachine-a
+```
+
+The page offers Big, machine tokens, and concrete agent IDs. Enter sends and Shift+Enter adds a
+newline. It polls read-only history, so a refresh, a timeout, or a second tab cannot duplicate a
+request; a reply that arrives after you close the tab remains visible on the next visit. Code fences,
+inline code, emphasis, and `https://` links render as text-first Markdown; everything else is
+escaped. Chat writes are deliberate button/key actions from the loopback page: they require the
+page's request header, a matching Host/Origin, and the bearer token when remote serving is enabled.
+The existing dashboard `/api/*` endpoints stay read-only. Do not expose this local page to the
+public internet without a trusted transport and your own access controls.
+
+## 8. Assign a goal to several machines
 
 State the goal once. A planner model splits it into tasks, you read the plan, and the workers on
 your machines run the steps in dependency order:
@@ -595,7 +654,7 @@ A run can report and ask while it works. `oguri worker mcp-config --runner claud
 give the runner oguri's tools, so the agent can use the `progress` and `ask` actions of `oguri_task`.
 It prints; it never edits your policy.
 
-## 8. Notifications and the dashboard
+## 9. Notifications and the dashboard
 
 The daemon can push to a phone or a team chat when someone needs your decision, or when a task
 you created completes or blocks. Channels go in the machine-local `~/.oguri/policy.yaml`,
@@ -631,7 +690,7 @@ room, requester, age, and link. Below that it shows machines and agents, tasks b
 needs-human items, and this machine's worker runs. It binds to loopback, and serving it further needs `--allow-remote` and a
 bearer token.
 
-## 9. Several networks and project roles
+## 10. Several networks and project roles
 
 One agent identity may join several oguri networks, each backed by a different transport
 repository. Bind the local desktop-project folder to the right network and advisory role:
@@ -653,7 +712,7 @@ overrides it for one command. Bindings live only in `OGURI_HOME/config.yaml`: og
 into, inspect, or manage either product repository. Roles are profile descriptions, not permissions.
 If one network genuinely needs two roles, use two agent identities with separate `OGURI_HOME`s.
 
-## 10. Delegate a repository review
+## 11. Delegate a repository review
 
 Pin the task to immutable revisions and a canonical repository id:
 
@@ -684,7 +743,7 @@ path, remote, command, or credentials. oguri never scans, clones, fetches, check
 product repository. The reviewing agent uses the workspace and source-access mechanisms already
 provided by its host, then returns findings through oguri.
 
-## 11. Integration surfaces
+## 12. Integration surfaces
 
 Editor setup lives in [Install](../README.md#install). Every plugin there runs `oguri mcp`, so the binary
 must be on `PATH`; a plugin never installs it and never creates a network. If you prefer no
@@ -713,7 +772,7 @@ Underneath the plugins, oguri exposes three integration surfaces:
 The daemon accumulates the inbox while no agent is running. A live agent drains it through
 MCP, the CLI, or the Markdown fallback.
 
-## 12. How it works
+## 13. How it works
 
 Four rules carry the design:
 

@@ -14,6 +14,7 @@ import {
   TASK_TRANSITION_CODES,
   TaskTransitionError,
   assertTaskTransition,
+  assertNoDependencyCycle,
   createTask as createProtocolTask,
   hasTaskAttemptsLeft,
   isTaskCapability,
@@ -68,6 +69,14 @@ export interface TaskUpdateInput {
   title?: string;
   /** New target; null makes an open task free to claim. Valid only for retargeting. */
   target?: string | null;
+  /**
+   * Valid only for `relinked`: tasks in the same room to add to the task's
+   * dependencies. The creator may do this only while the task is open and
+   * unclaimed.
+   */
+  addDependsOn?: readonly string[];
+  /** Valid only for `relinked`: current dependencies to drop. */
+  removeDependsOn?: readonly string[];
   /** Allowed only for blocked/stuck when a genuinely critical human decision is required. */
   needsHuman?: boolean;
   /**
@@ -142,11 +151,40 @@ function taskForAction(
   if (input.target !== undefined && input.action !== "retargeted") {
     throw new TaskTransitionError("only retargeting may provide a new task target");
   }
+  if (
+    (input.addDependsOn !== undefined || input.removeDependsOn !== undefined) &&
+    input.action !== "relinked"
+  ) {
+    throw new TaskTransitionError("only relinking may add or remove dependencies");
+  }
 
   const base: Task = { ...previous, action: input.action };
   switch (input.action) {
     case "refined":
       return { ...base, title: input.title ?? previous.title };
+    case "relinked": {
+      const add = [...(input.addDependsOn ?? [])];
+      const remove = [...(input.removeDependsOn ?? [])];
+      if (add.length === 0 && remove.length === 0) {
+        throw new TaskTransitionError(
+          "relinking needs at least one dependency to add (--add-depends-on) or remove (--remove-depends-on)",
+        );
+      }
+      const current = previous.dependsOn ?? [];
+      const missing = remove.filter((id) => !current.includes(id));
+      if (missing.length > 0) {
+        throw new TaskTransitionError(
+          `not a dependency of this task, so it cannot be removed: ${missing.join(", ")}`,
+        );
+      }
+      const already = add.filter((id) => current.includes(id) && !remove.includes(id));
+      if (already.length > 0) {
+        throw new TaskTransitionError(`already a dependency of this task: ${already.join(", ")}`);
+      }
+      const next = [...current.filter((id) => !remove.includes(id)), ...add];
+      const { dependsOn: _dependsOn, ...withoutDependencies } = base;
+      return next.length === 0 ? withoutDependencies : { ...withoutDependencies, dependsOn: next };
+    }
     case "retargeted": {
       if (input.target === undefined) {
         throw new TaskTransitionError(
@@ -425,7 +463,8 @@ export async function updateTask(
   input: TaskUpdateInput,
 ): Promise<Message> {
   if (input.body.trim().length === 0) throw new TypeError("task update must not be empty");
-  const status = (await listTasks(ctx, roomId)).find((candidate) => candidate.task.id === taskId);
+  const all = await listTasks(ctx, roomId);
+  const status = all.find((candidate) => candidate.task.id === taskId);
   if (status === undefined) throw new Error(`no task ${taskId} in room ${roomId}`);
 
   if (input.capabilities !== undefined) {
@@ -451,6 +490,14 @@ export async function updateTask(
 
   const task = taskForAction(status.task, input, ctx.agentId, ctx.machineId, capabilities);
   assertTaskTransition(status.task, task, ctx.agentId);
+  if (task.action === "relinked") {
+    // A typo'd dependency never completes, so check what is being added against
+    // the room before anything is written, as creation does.
+    const byId = new Map(all.map((candidate) => [candidate.task.id, candidate.task]));
+    const unknown = (input.addDependsOn ?? []).filter((id) => !byId.has(id));
+    if (unknown.length > 0) throw new TypeError(`no task ${unknown.join(", ")} in room ${roomId}`);
+    assertNoDependencyCycle(task.id, task.dependsOn ?? [], (id) => byId.get(id)?.dependsOn);
+  }
   if (input.needsHuman === true && task.action !== "blocked" && task.action !== "stuck") {
     throw new TaskTransitionError(
       "needs:human is allowed only for a blocked or stuck task that requires a critical human decision",

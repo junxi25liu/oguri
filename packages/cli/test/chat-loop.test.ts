@@ -141,7 +141,7 @@ describe("the chat loop", () => {
     request = asked.message_id;
 
     await intakePass();
-    assert.deepEqual(feishu.replies, [], "intake itself does not answer a request");
+    assert.equal(feishu.replies.length, 0, "intake itself does not answer a request");
 
     await workerPass();
     const [first] = await runnerCalls();

@@ -95,7 +95,7 @@ class FakeBackend {
           );
         case "send": {
           const input = params["input"] as Record<string, unknown>;
-          return this.add(params["room"] as string, "liu-big", input["body"] as string, {
+          return this.add(params["room"] as string, "alice-big", input["body"] as string, {
             ...(input["thread"] === undefined ? {} : { thread: input["thread"] as string }),
             ...(input["inReplyTo"] === undefined
               ? {}
@@ -128,7 +128,7 @@ function taskDetail(state: string, events: Record<string, unknown>[]): Record<st
       id: T1,
       title: "Rename the button",
       state,
-      creator: "liu-big",
+      creator: "alice-big",
       assignee: "box-claude",
       target: "box-claude",
     },
@@ -163,7 +163,7 @@ async function seedState(conversation: string): Promise<void> {
             room: "superagent",
             thread: conversation,
             messageId: conversation,
-            author: "liu",
+            author: "alice",
           },
         },
       },
@@ -183,7 +183,9 @@ const policy = {
 describe("the big superagent follows its workers", () => {
   it("passes on a worker's question at once, decides a handback afresh, and tells a merge once", async () => {
     const backend = new FakeBackend();
-    const asked = backend.add("superagent", "liu", "Rename the Save button", { tags: ["to-big"] });
+    const asked = backend.add("superagent", "alice", "Rename the Save button", {
+      tags: ["to-big"],
+    });
     await seedState(asked.header.id);
     backend.tasks.set(
       T1,
@@ -216,7 +218,7 @@ describe("the big superagent follows its workers", () => {
     let gh = "OPEN";
     const big = new BigSuperagent({
       backend: backend as never,
-      agentId: "liu-big",
+      agentId: "alice-big",
       home,
       loadPolicy: async () => policy,
       ask: async ({ prompt }) => {
@@ -269,7 +271,7 @@ describe("the big superagent follows its workers", () => {
     );
     const later = new BigSuperagent({
       backend: backend as never,
-      agentId: "liu-big",
+      agentId: "alice-big",
       home,
       loadPolicy: async () => policy,
       ask: async () => ({ ok: true, stdout: '{"kind":"ignore","reason":"x"}' }),
@@ -290,7 +292,9 @@ describe("the big superagent follows its workers", () => {
 
   it("deploys new work for a handback it can place", async () => {
     const backend = new FakeBackend();
-    const asked = backend.add("superagent", "liu", "Rename the Save button", { tags: ["handled"] });
+    const asked = backend.add("superagent", "alice", "Rename the Save button", {
+      tags: ["handled"],
+    });
     await seedState(asked.header.id);
     backend.tasks.set(
       T1,
@@ -310,7 +314,7 @@ describe("the big superagent follows its workers", () => {
     });
     const big = new BigSuperagent({
       backend: backend as never,
-      agentId: "liu-big",
+      agentId: "alice-big",
       home,
       loadPolicy: async () => policy,
       ask: async () => ({
@@ -338,7 +342,7 @@ describe("a decision may read tasks first", () => {
     worker: policy.worker,
     role: "big" as const,
     kinds: BIG_KINDS,
-    self: "liu-big",
+    self: "alice-big",
     runner: "brain",
     timeoutSeconds: 30,
     rooms: ["superagent"],
@@ -363,7 +367,7 @@ describe("a decision may read tasks first", () => {
     );
     const prompts: string[] = [];
     const decided = await decide(
-      { text: "How is the rename going?", author: "liu", context: [] },
+      { text: "How is the rename going?", author: "alice", context: [] },
       options(backend, (prompt) => {
         prompts.push(prompt);
         return prompts.length === 1
@@ -384,7 +388,7 @@ describe("a decision may read tasks first", () => {
     backend.tasks.set(T1, taskDetail("in_progress", []));
     const prompts: string[] = [];
     const decided = await decide(
-      { text: "Status?", author: "liu", context: [] },
+      { text: "Status?", author: "alice", context: [] },
       options(backend, (prompt) => {
         prompts.push(prompt);
         return JSON.stringify({ kind: "read", taskIds: [T1], reason: "again" });
@@ -430,7 +434,7 @@ describe("a standing session decides", () => {
     worker: policy.worker,
     role: "big" as const,
     kinds: BIG_KINDS,
-    self: "liu-big",
+    self: "alice-big",
     runner: "brain",
     timeoutSeconds: 30,
     rooms: ["superagent"],
@@ -446,7 +450,7 @@ describe("a standing session decides", () => {
       JSON.stringify({ kind: "answer", text: "Nothing is running.", reason: "fixed" }),
     ]);
     const decided = await decide(
-      { text: "Stop it", author: "liu", context: [] },
+      { text: "Stop it", author: "alice", context: [] },
       options(backend, mind),
     );
     assert.equal(decided.decision?.kind, "answer");
@@ -463,7 +467,7 @@ describe("a standing session decides", () => {
 
   it("says the model did not answer, so the request can be tried again", async () => {
     const decided = await decide(
-      { text: "Hi", author: "liu", context: [] },
+      { text: "Hi", author: "alice", context: [] },
       options(new FakeBackend(), new ScriptedMind([null])),
     );
     assert.equal(decided.decision, null);
@@ -474,8 +478,8 @@ describe("a standing session decides", () => {
 describe("the big superagent and its standing session", () => {
   it("decides once for messages that arrived together, and retries one the model did not answer", async () => {
     const backend = new FakeBackend();
-    const root = backend.add("superagent", "liu", "Rename the Save button", { tags: ["to-big"] });
-    backend.add("superagent", "liu", "and make it blue", {
+    const root = backend.add("superagent", "alice", "Rename the Save button", { tags: ["to-big"] });
+    backend.add("superagent", "alice", "and make it blue", {
       tags: ["to-big"],
       thread: root.header.id,
     });
@@ -483,7 +487,7 @@ describe("the big superagent and its standing session", () => {
     let answer: string | null = null;
     const big = new BigSuperagent({
       backend: backend as never,
-      agentId: "liu-big",
+      agentId: "alice-big",
       home: await freshHome(),
       loadPolicy: async () => policy,
       ask: async ({ prompt }) => {
@@ -506,7 +510,7 @@ describe("the big superagent and its standing session", () => {
       prompts[0] ?? "",
       /Several messages arrived together[\s\S]*Rename the Save button[\s\S]*and make it blue/,
     );
-    assert.equal(backend.messages.filter((m) => m.header.from === "liu-big").length, 0);
+    assert.equal(backend.messages.filter((m) => m.header.from === "alice-big").length, 0);
 
     // The third time it answers.
     answer = JSON.stringify({ kind: "answer", text: "Nothing is deployed yet.", reason: "ok" });
@@ -515,7 +519,7 @@ describe("the big superagent and its standing session", () => {
       third.handled.map((h) => h.decision),
       ["answer"],
     );
-    const replies = backend.messages.filter((m) => m.header.from === "liu-big");
+    const replies = backend.messages.filter((m) => m.header.from === "alice-big");
     assert.equal(replies.length, 1);
     assert.equal(
       replies[0]?.header.inReplyTo,
@@ -527,10 +531,10 @@ describe("the big superagent and its standing session", () => {
 
   it("gives up after three passes with no answer, and says so once", async () => {
     const backend = new FakeBackend();
-    backend.add("superagent", "liu", "Hello?", { tags: ["to-big"] });
+    backend.add("superagent", "alice", "Hello?", { tags: ["to-big"] });
     const big = new BigSuperagent({
       backend: backend as never,
-      agentId: "liu-big",
+      agentId: "alice-big",
       home: await freshHome(),
       loadPolicy: async () => policy,
       ask: async () => ({ ok: false, stdout: "", error: "timed out" }),
@@ -538,9 +542,314 @@ describe("the big superagent and its standing session", () => {
     const kinds = [];
     for (let i = 0; i < 4; i += 1) kinds.push(...(await big.pass()).handled.map((h) => h.decision));
     assert.deepEqual(kinds, ["deferred", "deferred", "undecided"]);
-    const said = backend.messages.filter((m) => m.header.from === "liu-big").map((m) => m.body);
+    const said = backend.messages.filter((m) => m.header.from === "alice-big").map((m) => m.body);
     assert.equal(said.length, 1);
     assert.match(said[0] ?? "", /could not decide/);
+  });
+});
+
+const WORK = "superagent-work";
+const CANCELLED = "01K00000000000000000000C01";
+const STUCK = "01K00000000000000000000S01";
+const OTHER = "01K00000000000000000000S02";
+
+interface Calls {
+  updates: { room: string; taskId: string; input: Record<string, unknown> }[];
+  creates: { room: string; input: Record<string, unknown> }[];
+}
+
+/** The fake backend, serving task statuses with `waitingOn` and recording task writes. */
+class StuckBackend extends FakeBackend {
+  readonly calls: Calls = { updates: [], creates: [] };
+  statuses: Record<string, unknown>[] = [];
+  override async call<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+    if (method === "tasks") {
+      return (params["room"] === WORK ? this.statuses : []) as T;
+    }
+    if (method === "taskUpdate") {
+      const input = params["input"] as Record<string, unknown>;
+      this.calls.updates.push({
+        room: params["room"] as string,
+        taskId: params["taskId"] as string,
+        input,
+      });
+      // Apply it, so later reads see what a real task would: a relink changes
+      // what the task waits on, a cancel ends it.
+      const target = this.statuses.find(
+        (s) => (s["task"] as { id: string }).id === params["taskId"],
+      );
+      if (target !== undefined) {
+        const task = target["task"] as { state: string; dependsOn?: string[] };
+        if (input["action"] === "cancelled") task.state = "cancelled";
+        if (input["action"] === "relinked") {
+          const removed = (input["removeDependsOn"] as string[] | undefined) ?? [];
+          const added = (input["addDependsOn"] as string[] | undefined) ?? [];
+          task.dependsOn = [
+            ...(task.dependsOn ?? []).filter((id) => !removed.includes(id)),
+            ...added,
+          ];
+          target["waitingOn"] = (target["waitingOn"] as { id: string }[]).filter(
+            (link) => !removed.includes(link.id),
+          );
+        }
+      }
+      return {} as T;
+    }
+    if (method === "taskCreate") {
+      this.calls.creates.push({
+        room: params["room"] as string,
+        input: params["input"] as Record<string, unknown>,
+      });
+      const id = `01K00000000000000000000N0${String(this.calls.creates.length)}`;
+      return { header: { id, thread: id, task: { id } } } as T;
+    }
+    if (method === "taskShow") {
+      const status = this.statuses.find(
+        (s) => (s["task"] as { id: string }).id === params["taskId"],
+      );
+      if (status === undefined) return null as T;
+      return {
+        ...status,
+        thread: params["taskId"],
+        definition: "Original definition",
+        events: [
+          {
+            messageId: "E",
+            ts: "2026-06-01T10:00:00.000Z",
+            action: "created",
+            body: "x",
+            refs: [],
+          },
+        ],
+      } as T;
+    }
+    return await super.call<T>(method, params);
+  }
+}
+
+function status(
+  id: string,
+  title: string,
+  state: string,
+  extra: { dependsOn?: string[]; waitingOn?: { id: string; state: string }[] } = {},
+): Record<string, unknown> {
+  return {
+    task: {
+      id,
+      title,
+      state,
+      creator: "alice-big",
+      ...(extra.dependsOn === undefined ? {} : { dependsOn: extra.dependsOn }),
+    },
+    health: state === "open" && (extra.waitingOn ?? []).length > 0 ? "blocked" : "active",
+    updatedAt: "2026-06-01T10:00:00.000Z",
+    definition: `${title} definition`,
+    waitingOn: extra.waitingOn ?? [],
+  };
+}
+
+describe("a task stuck behind a cancelled dependency", () => {
+  const bigFor = (backend: StuckBackend, home: string, answers: string[], seen: string[] = []) =>
+    new BigSuperagent({
+      backend: backend as never,
+      agentId: "alice-big",
+      home,
+      loadPolicy: async () => stuckPolicy,
+      ask: async ({ prompt }) => {
+        seen.push(prompt);
+        return {
+          ok: true,
+          stdout: answers.shift() ?? JSON.stringify({ kind: "ignore", reason: "x" }),
+        };
+      },
+    });
+  const stuckPolicy = {
+    ...policy,
+    superagent: {
+      ...policy.superagent,
+      big: { ...policy.superagent.big, coordinate: true },
+    },
+  };
+
+  function seeded(): StuckBackend {
+    const backend = new StuckBackend();
+    backend.statuses = [
+      status(CANCELLED, "Build the importer", "cancelled"),
+      status(STUCK, "Integrate the importer", "open", {
+        dependsOn: [CANCELLED],
+        waitingOn: [{ id: CANCELLED, state: "cancelled" }],
+      }),
+    ];
+    return backend;
+  }
+
+  it("shows Big the stuck task and the cancelled one, so it must pick an action", async () => {
+    const backend = seeded();
+    const prompts: string[] = [];
+    const big = new BigSuperagent({
+      backend: backend as never,
+      agentId: "alice-big",
+      home: await freshHome(),
+      loadPolicy: async () => stuckPolicy,
+      ask: async ({ prompt }) => {
+        prompts.push(prompt);
+        return {
+          ok: true,
+          stdout: JSON.stringify({
+            kind: "relink",
+            taskId: STUCK,
+            removeDependsOn: [CANCELLED],
+            reason: "the importer is no longer needed",
+          }),
+        };
+      },
+    });
+    const report = await big.pass();
+
+    assert.deepEqual(report.coordinated, [
+      { key: `stalled:${STUCK}:${CANCELLED}`, decision: "relink" },
+    ]);
+    assert.equal(backend.calls.updates.length, 1);
+    const [update] = backend.calls.updates;
+    assert.equal(update?.taskId, STUCK);
+    assert.equal(update?.input["action"], "relinked");
+    assert.deepEqual(update?.input["removeDependsOn"], [CANCELLED]);
+    assert.match(String(update?.input["body"]), /no longer needed/);
+    const prompt = prompts[0] ?? "";
+    assert.match(prompt, new RegExp(`STUCK: waiting on cancelled ${CANCELLED}`));
+    assert.match(prompt, /relink, replace, or stop/);
+    assert.match(prompt, /relink: change what a task that nobody has claimed waits for/);
+  });
+
+  it("can rebuild the cancelled task and move everything waiting on it", async () => {
+    const backend = seeded();
+    backend.statuses.push(
+      status(OTHER, "Document the importer", "open", {
+        dependsOn: [CANCELLED],
+        waitingOn: [{ id: CANCELLED, state: "cancelled" }],
+      }),
+    );
+    const big = bigFor(backend, await freshHome(), [
+      JSON.stringify({
+        kind: "replace",
+        taskId: CANCELLED,
+        title: "Build the importer again",
+        target: "box-claude",
+        reason: "still wanted",
+      }),
+    ]);
+    // The cancelled task is shown to Big because an open task waits on it.
+    const { decision } = await (async () => {
+      const report = await big.pass();
+      return { decision: report.coordinated[0]?.decision };
+    })();
+    // Both stuck tasks name the same cancelled dependency; the first decision replaces it.
+    assert.equal(decision, "replace");
+    // The replace moved both, so the second situation is already fixed: it is
+    // neither decided again nor reported as stuck.
+    assert.equal((await big.pass()).coordinated.length, 0);
+    assert.equal(
+      backend.messages.filter((m) => /Still stuck/.test(m.body)).length,
+      0,
+      "a fixed task is not announced as stuck",
+    );
+    assert.equal(backend.calls.creates.length, 1);
+    assert.equal(backend.calls.creates[0]?.input["title"], "Build the importer again");
+    assert.equal(backend.calls.creates[0]?.input["target"], "box-claude");
+    const moved = backend.calls.updates.map((u) => [
+      u.taskId,
+      u.input["addDependsOn"],
+      u.input["removeDependsOn"],
+    ]);
+    assert.deepEqual(moved, [
+      [STUCK, ["01K00000000000000000000N01"], [CANCELLED]],
+      [OTHER, ["01K00000000000000000000N01"], [CANCELLED]],
+    ]);
+  });
+
+  it("can stop the waiting task instead", async () => {
+    const backend = seeded();
+    const big = bigFor(backend, await freshHome(), [
+      JSON.stringify({ kind: "stop", taskId: STUCK, reason: "not worth doing without it" }),
+    ]);
+    const report = await big.pass();
+    assert.equal(report.coordinated[0]?.decision, "stop");
+    assert.equal(backend.calls.updates[0]?.taskId, STUCK);
+    assert.equal(backend.calls.updates[0]?.input["action"], "cancelled");
+  });
+
+  it("does not let 'ignore' or a failed model leave it silent, and looks again later", async () => {
+    const backend = seeded();
+    let clock = Date.parse("2026-06-02T10:00:00.000Z");
+    const big = new BigSuperagent({
+      backend: backend as never,
+      agentId: "alice-big",
+      home: await freshHome(),
+      loadPolicy: async () => stuckPolicy,
+      now: () => clock,
+      ask: async () => ({ ok: true, stdout: JSON.stringify({ kind: "ignore", reason: "later" }) }),
+    });
+    const first = await big.pass();
+    assert.equal(first.coordinated[0]?.decision, "undecided");
+    const told = backend.messages.filter((m) => m.header.from === "alice-big");
+    assert.equal(told.length, 1, "the owner is told it is still stuck");
+    assert.match(told[0]?.body ?? "", /Still stuck[\s\S]*cannot start/);
+    assert.equal(backend.calls.updates.length, 0);
+
+    // Not decided again at once, but after the retry delay it is.
+    assert.deepEqual((await big.pass()).coordinated, []);
+    clock += 31 * 60_000;
+    assert.equal((await big.pass()).coordinated.length, 1);
+  });
+
+  it("leaves a task alone once its dependency is no longer cancelled", async () => {
+    const backend = seeded();
+    backend.statuses = [
+      status(CANCELLED, "Build the importer", "cancelled"),
+      status(STUCK, "Integrate the importer", "open", { dependsOn: [] }),
+    ];
+    let asked = 0;
+    const big = new BigSuperagent({
+      backend: backend as never,
+      agentId: "alice-big",
+      home: await freshHome(),
+      loadPolicy: async () => stuckPolicy,
+      ask: async () => {
+        asked += 1;
+        return { ok: true, stdout: JSON.stringify({ kind: "ignore", reason: "x" }) };
+      },
+    });
+    assert.deepEqual((await big.pass()).coordinated, []);
+    assert.equal(asked, 0);
+  });
+
+  it("asks a person to authorize a runner, in the conversation, as a human-needed question", async () => {
+    const backend = seeded();
+    const big = bigFor(backend, await freshHome(), [
+      JSON.stringify({
+        kind: "request_runner",
+        runner: "codex-high",
+        machine: "machine:box",
+        taskId: STUCK,
+        reason: "the integration needs a stronger runner than any authorized here",
+      }),
+    ]);
+    // No stuck-task coordination in this test: ask through a direct decision.
+    const sent: Record<string, unknown>[] = [];
+    const original = backend.call.bind(backend);
+    backend.call = (async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === "send") sent.push(params["input"] as Record<string, unknown>);
+      return await original(method, params);
+    }) as typeof backend.call;
+    await big.pass();
+    const request = sent.find((input) =>
+      (input["tags"] as string[] | undefined)?.includes("runner-request"),
+    );
+    assert.ok(request !== undefined, "a runner request was sent");
+    assert.equal(request["needs"], "human");
+    assert.equal(request["kind"], "question");
+    assert.match(String(request["body"]), /Runner 'codex-high' needs a person's authorization/);
+    assert.match(String(request["body"]), /Nothing runs on it until you do/);
   });
 });
 

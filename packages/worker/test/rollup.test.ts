@@ -46,10 +46,22 @@ describe("parent roll-up", () => {
           state: "completed",
           events: [
             { action: "started" },
-            { action: "completed", refs: ["branch:step-a", "https://github.com/acme/app/pull/1"] },
+            {
+              action: "completed",
+              body: "Built the release.\nDetails must not appear in the roll-up.",
+              refs: ["branch:step-a", "https://github.com/acme/app/pull/1"],
+            },
           ],
         },
-        { id: KID_B, state: "completed", events: [{ action: "completed" }] },
+        {
+          id: KID_B,
+          state: "completed",
+          events: [
+            { action: "completed", body: "Old completion." },
+            { action: "completed", body: "Published the release.\nMore details." },
+            { action: "progressed", body: "Later note, not the completion." },
+          ],
+        },
       ]),
     );
     const outcome = await rollupParent(backend, ME, "ops", PARENT);
@@ -59,8 +71,65 @@ describe("parent roll-up", () => {
     assert.equal(done?.taskId, PARENT);
     assert.match(done?.body ?? "", /all 2 subtask\(s\) completed/);
     assert.match(done?.body ?? "", new RegExp(`${KID_A} Step A — branch:step-a`));
-    assert.match(done?.body ?? "", new RegExp(`${KID_B} Step B`));
+    assert.match(done?.body ?? "", new RegExp(`${KID_B} Step B — Published the release\\.`));
+    const childLines = (done?.body ?? "").split("\n");
+    assert.ok(
+      childLines.some(
+        (line) => line.startsWith(`- ${KID_A} `) && line.endsWith(" — Built the release."),
+      ),
+    );
+    assert.doesNotMatch(done?.body ?? "", /Details|More details|Old completion|Later note/);
     assert.deepEqual(done?.refs, ["branch:step-a", "https://github.com/acme/app/pull/1"]);
+  });
+
+  it("limits each completion's first line to 160 characters", async () => {
+    const summary = "查😀".repeat(100);
+    const { backend, updates } = fakeBackend(
+      family({}, [
+        {
+          id: KID_A,
+          state: "completed",
+          events: [{ action: "completed", body: `${summary}\nhidden details` }],
+        },
+      ]),
+    );
+    const outcome = await rollupParent(backend, ME, "ops", PARENT);
+    assert.equal(Array.from(outcome.children[0]?.summary ?? "").length, 160);
+    assert.ok((updates()[0]?.body ?? "").endsWith("查😀".repeat(80)));
+    assert.doesNotMatch(updates()[0]?.body ?? "", /hidden details|�/);
+  });
+
+  it("bounds the whole report to 8 KiB and keeps whole child lines", async () => {
+    const kids = Array.from({ length: 40 }, (_, i) => ({
+      id: `01J${String(i).padStart(23, "0")}`,
+      state: "completed",
+      events: [{ action: "completed", body: "查".repeat(160) }],
+    }));
+    const { backend, updates } = fakeBackend(family({}, kids));
+    await rollupParent(backend, ME, "ops", PARENT);
+    const body = updates()[0]?.body ?? "";
+    assert.ok(Buffer.byteLength(body, "utf8") <= 8 * 1024);
+    assert.match(body, /roll-up truncated/);
+    const lines = body.split("\n").filter((line) => line.startsWith("- "));
+    assert.ok(lines.length > 0 && lines.length < kids.length);
+    assert.ok(lines.every((line) => line.endsWith("查".repeat(160))));
+  });
+
+  it("withholds a completion summary flagged by the secret scanner", async () => {
+    const token = `ghp_${"a1B2c3D4e5F6g7H8i9J0".repeat(2).slice(0, 36)}`;
+    const { backend, updates } = fakeBackend(
+      family({}, [
+        {
+          id: KID_A,
+          state: "completed",
+          events: [{ action: "completed", body: `Token ${token}` }],
+        },
+      ]),
+    );
+    await rollupParent(backend, ME, "ops", PARENT);
+    assert.equal(updates()[0]?.action, "completed");
+    assert.match(updates()[0]?.body ?? "", /list was withheld: the secret scanner flagged it/);
+    assert.doesNotMatch(updates()[0]?.body ?? "", /ghp_/);
   });
 
   it("starts a parent that was only claimed, since a task completes from in progress", async () => {

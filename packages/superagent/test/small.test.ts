@@ -16,7 +16,7 @@ import { SmallSuperagent } from "../src/small.ts";
  */
 
 const NOW = Date.parse("2026-11-04T07:00:00.000Z");
-const AGENT = "liu-claude";
+const AGENT = "alice-claude";
 const OLD = new Date(NOW - 60 * 60_000).toISOString();
 
 function entry(id: string, title: string) {
@@ -50,8 +50,8 @@ describe("a small superagent's reports", () => {
         if (method === "agenda")
           return {
             entries: [
-              entry("01M6RUNNING000000000000000", "a step that went quiet"),
-              entry("01M6PARENT0000000000000000", "a plan waiting for its steps"),
+              entry("01ARZ3NDEKTSV4RRFFQ69G5F01", "a step that went quiet"),
+              entry("01ARZ3NDEKTSV4RRFFQ69G5F02", "a plan waiting for its steps"),
             ],
           } as T;
         if (method === "send") sent.push(params as never);
@@ -73,17 +73,17 @@ describe("a small superagent's reports", () => {
       machine: "mac-mini",
       home,
       loadPolicy: async () => ({ superagent, worker: {} as WorkerPolicy }),
-      running: () => new Set(["01M6RUNNING000000000000000"]),
+      running: () => new Set(["01ARZ3NDEKTSV4RRFFQ69G5F01"]),
       now: () => NOW,
     });
     const report = await small.pass();
     assert.deepEqual(
       report.reported.map((r) => [r.taskId, r.reason]),
-      [["01M6RUNNING000000000000000", "quiet"]],
+      [["01ARZ3NDEKTSV4RRFFQ69G5F01", "quiet"]],
     );
     assert.deepEqual(
       sent.map((s) => s.input.thread),
-      ["01M6RUNNING000000000000000"],
+      ["01ARZ3NDEKTSV4RRFFQ69G5F01"],
     );
   });
 });

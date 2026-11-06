@@ -185,6 +185,36 @@ describe("a live session", () => {
     });
     assert.equal(result.exitCode, 0);
     assert.match(await readFile(seen, "utf8"), /Only this\n---\nCLOSED/);
+    assert.equal(result.messagesRead, 1, "one message written, one result");
+  });
+
+  it("counts a message as read only once the session echoed it", async () => {
+    const seen = join(tmp, "seen4.txt");
+    let send: ((text: string) => boolean) | undefined;
+    const run = runExecutor({
+      argv: [process.execPath, folder],
+      cwd: tmp,
+      prompt: "First",
+      timeoutMs: 10_000,
+      logDir: join(tmp, "run4"),
+      env: { ...process.env, SEEN: seen },
+      live: { bind: (write) => (send = write), replay: true },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(send?.("Second, mid-turn"), true);
+    const result = await run;
+    assert.equal(result.messagesRead, 2, "both were echoed before the one result");
+  });
+
+  it("reports no messages read for a run that is not a live session", async () => {
+    const result = await runExecutor({
+      argv: ["sh", "-c", "exit 0"],
+      cwd: tmp,
+      prompt: "",
+      timeoutMs: 5_000,
+      logDir: join(tmp, "run5"),
+    });
+    assert.equal(result.messagesRead, undefined);
   });
 
   it("writes and reads stream-json lines", () => {

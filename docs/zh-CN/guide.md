@@ -2,7 +2,7 @@
 
 [English](../guide.md) | **简体中文**
 
-本指南用可以直接运行的命令介绍 oguri 的全部功能。五分钟上手见[README](../../README.zh-CN.md)；传输仓库的选择、编辑器配置、常见问题和故障排查见[快速上手](quickstart.md)。
+本指南用可以直接运行的命令介绍 oguri 的全部功能。五分钟上手见[README](../../README.zh-CN.md)；在新机器上从零装好 oguri、配置 worker 和 superagent，见[部署指南](deploy.md)；传输仓库的选择、编辑器配置、常见问题和故障排查见[快速上手](quickstart.md)。
 
 ## 目录
 
@@ -12,12 +12,13 @@
 4. [让机器自己执行发来的任务](#4-让机器自己执行发来的任务)
 5. [从团队群聊接收请求](#5-从团队群聊接收请求)
 6. [一个 superagent 管所有机器](#6-一个-superagent-管所有机器)
-7. [把一个目标分给多台机器](#7-把一个目标分给多台机器)
-8. [通知与面板](#8-通知与面板)
-9. [多个网络与项目角色](#9-多个网络与项目角色)
-10. [委托仓库评审](#10-委托仓库评审)
-11. [集成方式](#11-集成方式)
-12. [工作原理](#12-工作原理)
+7. [和 superagent 连续对话](#7-和-superagent-连续对话)
+8. [把一个目标分给多台机器](#8-把一个目标分给多台机器)
+9. [通知与面板](#9-通知与面板)
+10. [多个网络与项目角色](#10-多个网络与项目角色)
+11. [委托仓库评审](#11-委托仓库评审)
+12. [集成方式](#12-集成方式)
+13. [工作原理](#13-工作原理)
 
 ## 1. agent 之间直接对话
 
@@ -229,7 +230,7 @@ oguri worker install    # 登录时启动 worker（launchd 或 systemd --user）
 oguri worker uninstall  # 移除该服务
 ```
 
-worker 认领任务，把任务正文通过管道传给 runner 的 stdin，然后附上摘要，把任务标记为完成或 blocked。runner 是不经过 shell 的 argv，任务只能用第一行 `runner: <name>` 在它们之间选择。不在 `trustedRequesters` 里的请求者，仍要等 `oguri task approve`。每次运行都受并发数、每小时上限和超时约束，每小时上限在重启后依然有效。
+worker 认领任务，把任务正文通过管道传给 runner 的 stdin，然后附上摘要，把任务标记为完成或 blocked。runner 是不经过 shell 的 argv，任务只能用第一行 `runner: <name>` 在它们之间选择。不在 `trustedRequesters` 里的请求者，仍要等 `oguri task approve`。每次运行都受并发数、每小时上限和超时约束，每小时上限在重启后依然有效。单次运行最多 `worker.timeoutMinutes` 分钟（默认 180，可设 1 到 1440）；配置里写了该值的保持原值。
 
 runner 也可以写成映射。`worktree: true` 会让每个任务在 runner 的 `workdir` 的一个全新 git worktree 里运行，分支名为 `oguri/<task-id>-<run-id>`，这样并发运行永远不会共用同一个检出：
 
@@ -245,7 +246,7 @@ runners:
 
 worker 遵循任务图。只有依赖都完成后，它才认领某一步。配置 `capabilities: [gpu]` 后，它还会接用 `--requires gpu` 创建的空闲任务，并把 `gpu` 加入自己的档案。用 `--max-attempts` 创建的任务运行失败后，只要还有剩余次数，就会被释放出来重试；本机要等 `retry.backoffMinutes` 之后才会重新接手，最后一次失败会把任务标记为 blocked，留给人处理。
 
-运行可以写入 `$OGURI_RESULT_FILE`（运行目录下的 `result.json`），包含 `summary`，以及可选的 `branch`、`pr`、`artifacts` 或一个 `needsHuman` 问题。摘要会替代输出末尾，其余字段成为消息引用。当 worker 持有的父任务的所有子任务都完成时，worker 会附上一份汇总完成父任务；`oguri task rollup <room> <id>` 可以手动做同样的事。
+运行可以写入 `$OGURI_RESULT_FILE`（运行目录下的 `result.json`），包含 `summary`，以及可选的 `branch`、`artifacts` 或一个 `needsHuman` 问题；只有在本次运行确实开了 pull request 时才写 `pr`。摘要会替代输出末尾，其余字段成为消息引用。文件被拒绝时（未知键、`pr` 不是 `https://` URL、必填值为空等），里面什么都不发布，退出码为 0 也不算完成：本次运行按失败处理，带原因被释放或阻塞。当 worker 持有的父任务的所有子任务都完成时，worker 会附上一份汇总完成父任务；`oguri task rollup <room> <id>` 可以手动做同样的事。
 
 runner 可以为每个任务保留一个 agent 会话。`session` 说明运行的会话 id 从哪里来，`resume` 是继续该会话的 argv，其中 `{session}` 出现一次：
 
@@ -363,15 +364,15 @@ superagent:
 superagent:
   small:
     enabled: true
-    big: liu-big # Big superagent 的 agent id：它部署的 worker 在这里不用审批
+    big: alice-big # Big superagent 的 agent id：它部署的 worker 在这里不用审批
     # runner: brain         你直接和它对话时用来思考的 runner
-    # maxWorkers: 3         本机同时最多跑几个 worker（1 到 16）
+    # maxWorkers: 3         本机同时最多跑几个 worker（1 到 20）
     # quietMinutes: 30      worker 这么久没有更新就报告
 ```
 
 在每台机器上运行 `oguri superagent start`。它会启动策略里打开的角色：worker 引擎和 Small superagent，以及 Big superagent。
 
-只有一台机器时，可以用 `oguri agent add liu-big` 给 Big superagent 单独一个身份，也可以让两个角色用同一个身份。两种都行：worker 接受由自己身份转来的话。
+只有一台机器时，可以用 `oguri agent add alice-big` 给 Big superagent 单独一个身份，也可以让两个角色用同一个身份。两种都行：worker 接受由自己身份转来的话。
 
 ### 和它对话
 
@@ -417,7 +418,7 @@ Big superagent 对每条消息做一个决定：
 | `session: claude-json` 或 `codex-jsonl`，带 `resume` | 每轮一个进程，每次续上一轮的会话           |
 | 没有 `session`                                       | 每个请求调一次模型，所有内容一次给全       |
 
-会话 id 存在 `~/.oguri/superagent/` 下。规则变了、满 60 轮，或者续会话被拒，就开新会话。同一个对话里一起到达的几条消息只判断一次。模型没有应答时，下一轮会再试，最多再试两次，仍不行才告诉你什么都没启动。会话记住的东西不授予任何权限：每一轮都带当前记录，代码按记录校验每个决定。
+会话 id 存在 `~/.oguri/superagent/` 下。规则变了，或者续会话被拒，就开新会话；不会仅因轮数增加而重开。长上下文由 runner 自身的压缩机制管理（需要 runner 支持并启用）。同一个对话里一起到达的几条消息只判断一次。模型没有应答时，下一轮会再试，最多再试两次，仍不行才告诉你什么都没启动。会话记住的东西不授予任何权限：每一轮都带当前记录，代码按记录校验每个决定。
 
 ### 活的 worker
 
@@ -449,6 +450,12 @@ worker:
 
 每个 `claude` 或 `codex` worker 不用配置就带有 oguri 的工具：可以汇报进度、向你提问、交回超出范围的活。如果想让某个 runner 的命令保持原样，给它设置 `oguriTools: false`。
 
+### 分档位与 runner 授权
+
+用 `worker.tiers` 把 runner 分成从便宜到贵的若干档，superagent 按难度选档，并在任务里写上 `tier:` 和 `tier-reason:` 行。分档任务运行失败后会往上移一档，最多 `worker.escalation.maxSteps` 次；用 `runner:` 指定了 runner 的任务不会升档。人的追问可以为这次运行单独设置 `effort:`，并按该 runner 的 `efforts` 校验。
+
+Runner 授权让每个 runner 都要有人点头。`oguri runner grant <name>` 把授权绑定到该 runner 条目当前的样子，并且需要交互式终端；`oguri runner revoke <name>` 在 worker 的下一轮就生效；`oguri runner request <name> "<why>"` 让 agent 只提出申请、不授予任何东西；`oguri runner list` 查看状态。所有操作都会追加到 `runner-audit.jsonl`。在第一次授权之前，授权机制是关闭的。完整配置见[部署指南](deploy.md#44-分档位先用便宜的失败再升档)。
+
 ### 代码检查什么
 
 Small superagent 用同样的方式管自己这台机器，包括一个请求开几个 worker：开一个，或者拆成计划开多个，最多同时跑 `maxWorkers` 个。
@@ -457,7 +464,28 @@ Small superagent 用同样的方式管自己这台机器，包括一个请求开
 
 能推送到传输仓库的人，都能给 Big superagent 发消息。请让这个仓库只对你自己的机器开放。
 
-## 7. 把一个目标分给多台机器
+## 7. 和 superagent 连续对话
+
+`oguri chat` 直接和 Big 连续对话，用的是与 `oguri big` 相同的房间和消息标签，不是代理，也不是伪造的打字流：
+
+```console
+oguri chat
+oguri chat --target small-1              # 按 agent ID 找某台机器的 Small
+oguri chat --target machine:machine-a    # 该机器上只有一个 agent 时
+```
+
+提示符会显示当前目标；输入后按 Enter 发送。命令有 `/targets`、`/target <名字>`、`/history`、`/help`、`/exit`。切换目标后历史不会串到另一台机器；中文照常输入；`//` 发送一个字面斜杠；Ctrl-D 或 `/exit` 只退出当前终端；Ctrl-C 只中断等待，不会停止 superagent 或 worker。迟到回复留在不可变会话里，`/history` 能重新读到。超时只是提示检查 `oguri superagent start` 是否在运行，绝不会自动重发任务。
+
+`oguri web` 运行时，网页聊天入口是独立的 `/chat`：
+
+```text
+http://127.0.0.1:7380/chat?target=big
+http://127.0.0.1:7380/chat?target=machine%3Amachine-a
+```
+
+页面可以选择 Big、机器 token 或具体 agent ID；Enter 发送，Shift+Enter 换行。页面只轮询读取历史，因此刷新、超时或开第二个标签页都不会重复发送请求；关闭页面后才到的回复，下次打开仍可读。代码围栏、行内代码、强调和 `https://` 链接按文本优先的 Markdown 渲染，其余字符一律转义。网页写操作只来自按钮/键盘的明确动作，并要求本页请求头、匹配的 Host/Origin；启用对外服务时还必须带 bearer token。原有面板 `/api/*` 仍然只读。没有可信传输和额外访问控制时，不要把本机页面直接暴露到公网。
+
+## 8. 把一个目标分给多台机器
 
 目标只需说一次。规划模型把它拆成任务，你审阅计划，然后各台机器上的 worker 按依赖顺序执行各个步骤：
 
@@ -473,7 +501,7 @@ oguri task tree ops <parent-id>                      # 查看创建出来的任�
 
 运行过程中也可以汇报进度和提问。`oguri worker mcp-config --runner claude` 会打印如何把 oguri 的工具配给 runner，让 agent 能使用 `oguri_task` 的 `progress` 和 `ask` 动作。它只打印，从不修改你的策略。
 
-## 8. 通知与面板
+## 9. 通知与面板
 
 当有人需要你做决定，或者你创建的任务完成或 blocked 时，守护进程可以推送到手机或团队群。通道写在本机策略（`~/.oguri/policy.yaml`）里，因为它们的 URL 和 token 都是凭据：
 
@@ -500,7 +528,7 @@ oguri web               # 只读面板，地址是 http://127.0.0.1:7380/
 
 消息正文在发出前会经过秘密扫描并截断，每个通道每小时最多 30 条推送。面板最上方是 **Needs you**：卡在等人处理的任务、发到群里但没人回答的问题，以及最近完成的任务产生的 pull request，每项都带房间、请求者、时长和链接。下面是机器和 agent、按状态分组的任务、需要人来决定的事项，以及本机 worker 的运行记录。面板只绑定回环地址；要对外提供，需要 `--allow-remote` 和一个 bearer token。
 
-## 9. 多个网络与项目角色
+## 10. 多个网络与项目角色
 
 一个 agent 身份可以加入多个 oguri 网络，每个网络由不同的传输仓库承载。把本地的桌面项目文件夹绑定到正确的网络和参考角色：
 
@@ -517,7 +545,7 @@ oguri project bind . --network social --role "Social reviewer"
 
 此后，在每个文件夹下启动的 CLI 命令和 MCP 会话会自动选择对应的网络。`oguri project current` 显示当前生效的绑定；显式的 `--network` 可以为单条命令覆盖它。绑定只保存在 `OGURI_HOME/config.yaml` 里：oguri 不会写入、检查或管理任何一个产品仓库。角色是档案里的描述，不是权限。如果一个网络确实需要两个角色，就用两个 agent 身份，各自使用独立的 `OGURI_HOME`。
 
-## 10. 委托仓库评审
+## 11. 委托仓库评审
 
 把任务钉在不可变的修订版本和规范的仓库 id 上：
 
@@ -541,7 +569,7 @@ oguri review update architecture 01KZRJ6N68KF8WB91XW6QW31DE reported \
 
 共享的任务携带仓库身份和修订版本，从不携带另一台机器的本地路径、remote、命令或凭据。oguri 从不扫描、克隆、拉取、检出或编辑产品仓库。评审的 agent 使用宿主已经提供的工作区和源码访问机制，再通过 oguri 返回发现。
 
-## 11. 集成方式
+## 12. 集成方式
 
 编辑器配置见[安装](../../README.zh-CN.md#安装)。那里的每个插件都运行 `oguri mcp`，所以二进制必须在 `PATH` 上；插件从不安装它，也从不创建网络。如果不想用插件，每个工具也有独立的配置命令：
 
@@ -563,7 +591,7 @@ Codex 市场镜像了 Claude 市场里的两个产品。`oguri@oguri` 是直接�
 
 没有 agent 运行时，守护进程会持续积累收件箱。在线的 agent 通过 MCP、CLI 或 Markdown 兜底方式把它清空。
 
-## 12. 工作原理
+## 13. 工作原理
 
 设计靠四条规则支撑：
 

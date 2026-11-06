@@ -36,6 +36,8 @@ export const OPTIONS = {
   target: { type: "string" },
   "stale-after": { type: "string" },
   "depends-on": { type: "string", multiple: true },
+  "add-depends-on": { type: "string", multiple: true },
+  "remove-depends-on": { type: "string", multiple: true },
   parent: { type: "string" },
   requires: { type: "string", multiple: true },
   "max-attempts": { type: "string" },
@@ -76,6 +78,10 @@ export const OPTIONS = {
   channel: { type: "string" },
   // `oguri plan` and `oguri worker mcp-config`
   runner: { type: "string" },
+  // `oguri runner grant | request`
+  for: { type: "string", multiple: true },
+  expires: { type: "string" },
+  task: { type: "string" },
   "dry-run": { type: "boolean" },
   yes: { type: "boolean" },
   "from-file": { type: "string" },

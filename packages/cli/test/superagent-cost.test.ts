@@ -63,8 +63,9 @@ async function writeRun(spec: RunSpec): Promise<void> {
   if (spec.stdout !== undefined) await writeFile(join(dir, "stdout.log"), spec.stdout);
 }
 
-const claudeJson = (cost: number): string =>
-  JSON.stringify({ type: "result", session_id: "abc", result: "done", total_cost_usd: cost });
+/** A run of its own session, so its figure is that session's whole bill. */
+const claudeJson = (cost: number, session = `s-${String(cost)}`): string =>
+  JSON.stringify({ type: "result", session_id: session, result: "done", total_cost_usd: cost });
 
 /** Each case starts from no runs, so one test's figures never leak into the next. */
 async function resetRuns(): Promise<void> {
@@ -77,7 +78,7 @@ before(async () => {
   home = join(tmp, "home");
   remote = join(tmp, "transport.git");
   await exec("git", ["init", "--bare", "--quiet", "--initial-branch=main", remote]);
-  await oguri("init", "--repo", remote, "--network", "home", "--agent", "liu-claude");
+  await oguri("init", "--repo", remote, "--network", "home", "--agent", "alice-claude");
 });
 
 after(async () => {
@@ -92,6 +93,41 @@ describe("superagent status: today's runs", () => {
     await writeRun({ task: "01JA", run: "r2", startedAt: now, stdout: claudeJson(0.5) });
     const shown = await oguri("superagent", "status");
     assert.match(shown, /today\s+2 worker run\(s\) · \$0\.75/);
+  });
+
+  it("counts a resumed session once, not once per run", async () => {
+    // A resumed turn prints the session's whole spend, so summing runs would
+    // report the same money three times. This is the figure a person budgets by.
+    await resetRuns();
+    const now = new Date();
+    const session = (cost: number): string =>
+      JSON.stringify({ type: "result", session_id: "one", result: "done", total_cost_usd: cost });
+    await writeRun({ task: "01JE", run: "r1", startedAt: now, stdout: session(2.418752) });
+    await writeRun({ task: "01JE", run: "r2", startedAt: now, stdout: session(10.922321) });
+    await writeRun({ task: "01JE", run: "r3", startedAt: now, stdout: session(25.440337) });
+    const shown = await oguri("superagent", "status");
+    // Every one of the three runs is inside the figure, so it is a total.
+    assert.match(shown, /today\s+3 worker run\(s\) · \$25\.44 total\n/);
+  });
+
+  it("calls the figure a subtotal and counts what it leaves out", async () => {
+    // The run without a price is real spend this figure does not cover. Saying
+    // "total" here would be a claim the logs do not support.
+    await resetRuns();
+    const now = new Date();
+    await writeRun({ task: "01JF", run: "r1", startedAt: now, stdout: claudeJson(0.4) });
+    await writeRun({ task: "01JF", run: "r2", startedAt: now, stdout: "no price printed\n" });
+    await writeRun({ task: "01JF", run: "r3", startedAt: now, stdout: "plain output\n" });
+    const shown = await oguri("superagent", "status");
+    assert.match(
+      shown,
+      /today\s+3 worker run\(s\) · \$0\.40 known subtotal · 2 run\(s\) unpriced\n/,
+    );
+    assert.ok(
+      !/known subtotal[^\n]*\btotal\b/.test(shown),
+      "a subtotal is never also called a total",
+    );
+    assert.match(shown, /worker runs only; excludes Big\/Small superagent brain sessions/);
   });
 
   it("shows the count without a figure when no log carries a price", async () => {

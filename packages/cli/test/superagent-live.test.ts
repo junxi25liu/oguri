@@ -37,18 +37,27 @@ let buffer = "";
 const queue = [];
 let busy = false;
 let turns = 0;
+let release = null;
 const turn = () => {
   if (busy || queue.length === 0) return;
   busy = true;
   const text = queue.shift();
   fs.appendFileSync(process.env.SEEN, text + "\\n---\\n");
+  console.log(JSON.stringify({ type: "user", isReplay: true,
+    message: { role: "user", content: [{ type: "text", text }] } }));
   turns += 1;
-  setTimeout(() => {
+  const first = turns === 1;
+  const finish = () => {
+    clearTimeout(timer);
+    release = null;
     console.log(JSON.stringify({ type: "result", session_id: ${JSON.stringify(SESSION)},
-      result: turns === 1 ? "Renamed the title." : "Renamed the subtitle as well." }));
+      result: first ? "Renamed the title." : "Renamed the subtitle as well." }));
     busy = false;
     turn();
-  }, turns === 1 ? 14000 : 200);
+  };
+  // The first turn lasts until the follow-up arrives, so a loaded machine cannot outrun it.
+  const timer = setTimeout(finish, first ? 90000 : 200);
+  if (first) release = finish;
 };
 console.log(JSON.stringify({ type: "system", subtype: "init", session_id: ${JSON.stringify(SESSION)} }));
 process.stdin.on("data", (d) => {
@@ -58,7 +67,8 @@ process.stdin.on("data", (d) => {
     const line = buffer.slice(0, i); buffer = buffer.slice(i + 1);
     if (line.trim()) queue.push(JSON.parse(line).message.content[0].text);
   }
-  turn();
+  if (release && queue.length > 0) release();
+  else turn();
 });
 `;
 
@@ -121,7 +131,7 @@ before(async () => {
   hq = join(tmp, "hq");
   box = join(tmp, "box");
   await exec("git", ["init", "--bare", "--quiet", "--initial-branch=main", remote]);
-  await oguri(hq, "init", "--repo", remote, "--network", "home", "--agent", "liu-big");
+  await oguri(hq, "init", "--repo", remote, "--network", "home", "--agent", "alice-big");
   await oguri(box, "init", "--repo", remote, "--network", "home", "--agent", "box-claude");
   const node = JSON.stringify(process.execPath);
   const streamer = JSON.stringify(join(tmp, "streamer.cjs"));
@@ -154,7 +164,7 @@ before(async () => {
       "  enabled: true",
       ...runners,
       "superagent:",
-      "  small: { enabled: true, big: liu-big, talk: false }",
+      "  small: { enabled: true, big: alice-big, talk: false }",
       "",
     ].join("\n"),
   );

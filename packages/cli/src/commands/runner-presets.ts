@@ -15,8 +15,9 @@
 
 import type { SessionMode } from "@oguri/core";
 
-import { type Ctx, bool, usage } from "../context.ts";
+import { type Ctx, bool } from "../context.ts";
 import { bold, dim, json, out } from "../output.ts";
+import { cmdRunnerGrants } from "./runner-grants.ts";
 
 /** One runner, exactly as `worker.runners.<name>` accepts it. */
 export interface PresetRunner {
@@ -131,16 +132,16 @@ export const RUNNER_PRESETS: readonly RunnerPreset[] = [
     },
   },
   {
-    name: "dsk",
-    titleZh: "便宜模型 deepseek-v4.1-flash：活会话，适合直接的实现",
-    titleEn: "Cheap model deepseek-v4.1-flash: a live session for direct implementation",
+    name: "cheap",
+    titleZh: "便宜模型（占位名）：活会话，适合直接的实现",
+    titleEn: "Cheap model (placeholder name): a live session for direct implementation",
     noteZh:
-      "模型写在 argv 里，不依赖 model: 字段。claude 要能访问这个模型，比如把 ANTHROPIC_BASE_URL 指向 DeepSeek 的 Anthropic 兼容接口。能改文件、跑 pnpm/node/git/ls/cat；git push 被显式禁掉。",
+      "模型名只是占位符，换成你自己的 provider/gateway 提供的模型；模型写在 argv 里，不依赖 model: 字段。claude 要访问 gateway 上的模型，就把 ANTHROPIC_BASE_URL（以及你的 gateway 需要的鉴权变量）指向那个 gateway。能改文件、跑 pnpm/node/git/ls/cat；git push 被显式禁掉。",
     noteEn:
-      "The model is named in the argv, not in a model: key. claude must be able to reach it, for example with ANTHROPIC_BASE_URL pointing at DeepSeek's Anthropic-compatible API. It may edit files and run pnpm/node/git/ls/cat; git push is explicitly denied.",
+      "The model name is a placeholder: replace it with the model your own provider or gateway serves. It is named in the argv, not in a model: key. If claude must reach a gateway-hosted model, point ANTHROPIC_BASE_URL (and the auth variable your gateway needs) at that gateway. It may edit files and run pnpm/node/git/ls/cat; git push is explicitly denied.",
     runner: {
-      argv: liveClaude("deepseek-v4.1-flash"),
-      resume: resuming(liveClaude("deepseek-v4.1-flash")),
+      argv: liveClaude("my-cheap-model"),
+      resume: resuming(liveClaude("my-cheap-model")),
       session: "claude-stream",
       worktree: true,
       workdir: "~/src/app",
@@ -155,8 +156,8 @@ export const RUNNER_PRESETS: readonly RunnerPreset[] = [
     noteEn:
       "--tools= turns every tool off: a superagent only decides and dispatches, while the actual work stays a task a worker runs. oguriTools: false also keeps oguri's own MCP tools out of its argv.",
     runner: {
-      argv: claudeStream("claude-opus-5.5", "--effort", "high", "--tools="),
-      resume: resuming(claudeStream("claude-opus-5.5", "--effort", "high", "--tools=")),
+      argv: claudeStream("opus", "--effort", "high", "--tools="),
+      resume: resuming(claudeStream("opus", "--effort", "high", "--tools=")),
       session: "claude-stream",
       oguriTools: false,
     },
@@ -165,12 +166,12 @@ export const RUNNER_PRESETS: readonly RunnerPreset[] = [
     name: "brain-lite",
     titleZh: "给 small superagent 用的便宜 brain：无工具，常驻会话",
     titleEn: "The small superagent's cheap brain: no tools, standing session",
-    noteZh: "本机的小 superagent 用它汇报和回答，不必花 Opus 的钱。",
+    noteZh: "本机的小 superagent 用它汇报和回答，不必花大模型的钱。",
     noteEn:
-      "A small superagent on the same machine reports and answers with this instead of spending Opus money.",
+      "A small superagent on the same machine reports and answers with this instead of spending on a large model.",
     runner: {
-      argv: claudeStream("deepseek-v4.1-flash", "--tools="),
-      resume: resuming(claudeStream("deepseek-v4.1-flash", "--tools=")),
+      argv: claudeStream("my-cheap-model", "--tools="),
+      resume: resuming(claudeStream("my-cheap-model", "--tools=")),
       session: "claude-stream",
       oguriTools: false,
     },
@@ -218,18 +219,18 @@ export function presetsYaml(): string[] {
   // reminding about the two keys that must name an entry is more useful.
   lines.push("  # 下面两个名字必须是上面 runner 的名字");
   lines.push("  # Both names must be a key of worker.runners above.");
-  lines.push("  # defaultRunner: dsk");
+  lines.push("  # defaultRunner: cheap");
   lines.push("  # plannerRunner: brain");
   return lines;
 }
 
 /**
- * `oguri runner <subcommand>`. `presets` is the whole command today; the bare
- * form does the same thing, because printing is what someone typing it wants.
+ * `oguri runner <subcommand>`. The bare form prints presets, because printing
+ * is what someone typing it wants; grants live in `runner-grants.ts`.
  */
 export async function cmdRunner(ctx: Ctx): Promise<number> {
   const sub = ctx.positionals[1] ?? "presets";
-  if (sub !== "presets") usage(`unknown runner subcommand '${sub}'; use presets`);
+  if (sub !== "presets") return await cmdRunnerGrants(ctx, sub);
   return await cmdRunnerPresets(ctx);
 }
 

@@ -3,7 +3,8 @@
  *
  * Read-only is enforced, not intended. The server reaches the network only
  * through `ReadOnlyBackend`, which permits an explicit list of read methods,
- * and it answers nothing but GET and HEAD.
+ * and it answers nothing but GET and HEAD. The separate `/chat` handler has
+ * its own write-capable route and guards; this handler only registers it.
  *
  * Exposure is the other half. It binds to loopback by default. A non-loopback
  * bind needs `--allow-remote` and always a bearer token. On loopback, the Host
@@ -11,12 +12,20 @@
  * at 127.0.0.1 and read the dashboard through the visitor's browser.
  */
 
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { isIP } from "node:net";
 
 import type { Agenda, InboxItem, MachineRow, PresenceRow } from "@oguri/core";
 
+import {
+  bearerMatches,
+  DEFAULT_WEB_HOST,
+  DEFAULT_WEB_PORT,
+  hostName,
+  isLoopbackHost,
+  type BindPlan,
+} from "./http.ts";
+import { chatHandler, type ChatOptions } from "./chat-api.ts";
 import {
   describe,
   humanItem,
@@ -28,27 +37,16 @@ import {
 import { sortNeedsYou } from "./needs-you.ts";
 import { renderPage } from "./page.ts";
 
-export const DEFAULT_WEB_PORT = 7380;
-export const DEFAULT_WEB_HOST = "127.0.0.1";
+export {
+  bearerMatches,
+  DEFAULT_WEB_PORT,
+  DEFAULT_WEB_HOST,
+  isLoopbackHost,
+  type BindPlan,
+} from "./http.ts";
 
 /** Several tabs polling at once share one aggregate for this long. */
 const DASHBOARD_CACHE_MS = 2_000;
-
-/** Whether a host string names this machine's loopback interface. */
-export function isLoopbackHost(host: string): boolean {
-  const bare = host.replace(/^\[(.*)\]$/, "$1").toLowerCase();
-  if (bare === "localhost" || bare === "::1") return true;
-  return isIP(bare) === 4 && bare.startsWith("127.");
-}
-
-export interface BindPlan {
-  host: string;
-  port: number;
-  /** Null means no token is required: loopback with none given. */
-  token: string | null;
-  /** True when the token was generated here and must be shown to the user. */
-  generated: boolean;
-}
 
 /**
  * Decide what to bind and whether a token guards it.
@@ -83,21 +81,13 @@ export function planBind(options: {
   return { host, port, token: randomBytes(24).toString("base64url"), generated: true };
 }
 
-/** Constant-time comparison of an `Authorization` header against the token. */
-export function bearerMatches(header: string | undefined, token: string): boolean {
-  const match = /^Bearer\s+(\S+)\s*$/i.exec(header ?? "");
-  if (match === null) return false;
-  const given = createHash("sha256")
-    .update(match[1] as string)
-    .digest();
-  const wanted = createHash("sha256").update(token).digest();
-  return timingSafeEqual(given, wanted);
-}
-
-export interface DashboardServerOptions extends DashboardSources {
+export interface DashboardServerOptions extends DashboardSources, Omit<ChatOptions, "plan"> {
   plan: BindPlan;
   log?: (line: string) => void;
 }
+
+// One authoritative shape for the machine-local facts, shared with the dashboard fold.
+export type { LocalPolicyFacts, LocalUsageFacts } from "./execution.ts";
 
 const SECURITY_HEADERS: Record<string, string> = {
   "x-content-type-options": "nosniff",
@@ -127,20 +117,13 @@ function sendJson(res: ServerResponse, status: number, value: unknown, head = fa
   send(res, status, "application/json; charset=utf-8", JSON.stringify(value), {}, head);
 }
 
-/** Host header without the port, or null when absent. */
-function hostName(req: IncomingMessage): string | null {
-  const raw = req.headers.host;
-  if (raw === undefined) return null;
-  const match = /^(\[[^\]]+\]|[^:]+)(?::\d+)?$/.exec(raw);
-  return match === null ? null : (match[1] as string);
-}
-
 /** Build the request handler. Exported so tests can drive it without a socket. */
 export function dashboardHandler(
   options: DashboardServerOptions,
 ): (req: IncomingMessage, res: ServerResponse) => void {
   const { plan } = options;
   const loopback = isLoopbackHost(plan.host);
+  const chat = chatHandler({ plan, ...(options.chat === undefined ? {} : { chat: options.chat }) });
   let cached: { at: number; value: Promise<Record<string, unknown>> } | null = null;
 
   const dashboard = (): Promise<Record<string, unknown>> => {
@@ -193,6 +176,9 @@ export function dashboardHandler(
 
   return (req, res) => {
     const head = req.method === "HEAD";
+    // `/chat` has its own guarded handler. The dashboard below stays a
+    // GET/HEAD-only surface over ReadOnlyBackend, exactly as before.
+    if (chat(req, res, head)) return;
     if (req.method !== "GET" && !head) {
       send(res, 405, "text/plain; charset=utf-8", "read-only: GET and HEAD only\n", {
         allow: "GET, HEAD",

@@ -8,7 +8,13 @@
 
 import { DEFAULT_WORKER_POLICY, type Agenda, type WorkerPolicy } from "@oguri/core";
 import type { Backend } from "@oguri/daemon";
-import { ulid, type ExternalRef, type Message, type TaskOrigin } from "@oguri/protocol";
+import {
+  ulid,
+  type ExternalRef,
+  type Message,
+  type Priority,
+  type TaskOrigin,
+} from "@oguri/protocol";
 
 import type { RunResult } from "../src/runner.ts";
 
@@ -51,6 +57,8 @@ export interface FakeTask {
   maxAttempts?: number;
   waitingOn?: { id: string; state: string }[];
   children?: { id: string; state: string }[];
+  parent?: string;
+  dependsOn?: string[];
   /** Events for `taskShow`, oldest first. */
   events?: {
     action: string;
@@ -65,6 +73,8 @@ export interface FakeTask {
   /** The task's thread; defaults to its id, as for a real task. */
   thread?: string;
   origin?: TaskOrigin;
+  /** The priority its creator gave it; the agenda always carries one, default `normal`. */
+  priority?: Priority;
   /** Events for `taskShow` carry this time when they name none. */
   eventTs?: string;
 }
@@ -107,6 +117,7 @@ export function threadMessage(
       priority: "normal",
       tags: options.tags ?? [],
       refs: [],
+      extra: {},
       ...(options.inReplyTo === undefined ? {} : { inReplyTo: options.inReplyTo }),
       ...(options.relay === undefined ? {} : { relay: options.relay }),
       ...(options.external === undefined
@@ -140,10 +151,13 @@ function status(t: FakeTask) {
       ...(t.attempt === undefined ? {} : { attempt: t.attempt }),
       ...(t.maxAttempts === undefined ? {} : { maxAttempts: t.maxAttempts }),
       ...(t.origin === undefined ? {} : { origin: t.origin }),
+      ...(t.parent === undefined ? {} : { parent: t.parent }),
+      ...(t.dependsOn === undefined ? {} : { dependsOn: t.dependsOn }),
     },
     thread: t.thread ?? t.id,
     rootMessageId: t.thread ?? t.id,
     definition: t.definition ?? "Do the thing.",
+    priority: t.priority ?? "normal",
     waitingOn: t.waitingOn ?? [],
     children: t.children ?? [],
   };

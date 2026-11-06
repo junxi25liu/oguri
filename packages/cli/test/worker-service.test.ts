@@ -30,16 +30,16 @@ describe("worker service", () => {
       command: "/usr/bin/node",
       args: ["/repo/packages/cli/dist/bin.js"],
     });
-    assert.deepEqual(cliEntryFor("/Users/b/.local/bin/oguri", undefined), {
-      command: "/Users/b/.local/bin/oguri",
+    assert.deepEqual(cliEntryFor("/home/user/.local/bin/oguri", undefined), {
+      command: "/home/user/.local/bin/oguri",
       args: [],
     });
     assert.deepEqual(cliEntryFor("/usr/bin/node", "/usr/lib/node_modules/oguri/x.js"), {
       command: "oguri",
       args: [],
     });
-    const unit = renderUnit("systemd", "/Users/b/.local/bin/oguri", ["worker", "start"], spec);
-    assert.match(unit, /ExecStart=\/Users\/b\/\.local\/bin\/oguri worker start/);
+    const unit = renderUnit("systemd", "/home/user/.local/bin/oguri", ["worker", "start"], spec);
+    assert.match(unit, /ExecStart=\/home\/user\/\.local\/bin\/oguri worker start/);
   });
 });
 

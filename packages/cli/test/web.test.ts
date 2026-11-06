@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -8,6 +8,7 @@ import { runInNewContext } from "node:vm";
 import { after, before, describe, it } from "node:test";
 
 import type { Backend } from "@oguri/daemon";
+import { Layout } from "@oguri/core";
 
 import { escapeHtml, renderPage } from "../src/web/page.ts";
 import { READ_METHODS, ReadOnlyBackend, redactRemote, taskView } from "../src/web/data.ts";
@@ -605,11 +606,13 @@ describe("task view", () => {
 describe("oguri web, through the built binary", () => {
   let tmp: string;
   let home: string;
+  let remotePath: string;
   let child: ChildProcess | null = null;
 
   before(async () => {
     tmp = await mkdtemp(join(tmpdir(), "oguri-web-"));
     const remote = join(tmp, "transport.git");
+    remotePath = remote;
     home = join(tmp, "alice");
     await exec("git", ["init", "--bare", "--quiet", "--initial-branch=main", remote]);
     const env = testEnv({ OGURI_HOME: home, NO_COLOR: "1" });
@@ -678,5 +681,170 @@ describe("oguri web, through the built binary", () => {
     child.kill("SIGTERM");
     assert.equal(await exited, 0);
     child = null;
+  });
+
+  /**
+   * The dashboard's machine-local half, through the real command.
+   *
+   * `cmdWeb` is the only place that reads `policy.yaml` and the run logs, and
+   * it used to leave both callbacks out, so the page always said "unknown"
+   * even where a real answer existed. Driving the binary is the only way to
+   * catch that wiring missing again: a handler-level fixture supplies the
+   * callbacks itself and cannot see the gap.
+   */
+  it("passes this machine's policy and run history into the dashboard", async () => {
+    const home = join(tmp, "bob");
+    const layout = new Layout(home);
+    const env = testEnv({ OGURI_HOME: home, NO_COLOR: "1" });
+    await exec(
+      process.execPath,
+      [CLI, "init", "--repo", remotePath, "--network", "acme", "--agent", "bob-cursor"],
+      { env },
+    );
+    // A policy with two limits that differ, so the page cannot confuse them.
+    await writeFile(
+      join(home, "policy.yaml"),
+      [
+        "v: 1",
+        "worker:",
+        "  enabled: true",
+        "  concurrency: 4",
+        "  maxPerHour: 18",
+        "  runners:",
+        '    cheap: ["my-cheap-model", "-p"]',
+        "superagent:",
+        "  small:",
+        "    maxWorkers: 6",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    // One run today whose log carries a price, and one local day of usage.
+    // It is finished on purpose: `todayUsage` leaves a run still in flight out
+    // of the subtotal, because a running run's cumulative figure is not final.
+    const runDir = join(layout.root, "runs", "01MTASK");
+    await mkdir(runDir, { recursive: true });
+    const startedAt = new Date().toISOString();
+    await writeFile(
+      join(runDir, "run.json"),
+      JSON.stringify({
+        taskId: "01MTASK",
+        runId: "01MRUN",
+        room: "architecture",
+        title: "wired run",
+        runner: "cheap",
+        startedAt,
+        outcome: "completed",
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(runDir, "stdout.log"),
+      `${JSON.stringify({ type: "result", total_cost_usd: 1.25 })}\n`,
+      "utf8",
+    );
+
+    const server = spawn(process.execPath, [CLI, "web", "--port", "0", "--direct"], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const url = await new Promise<string>((resolve, reject) => {
+        let seen = "";
+        const timer = setTimeout(() => reject(new Error(`no URL printed: ${seen}`)), 20_000);
+        server.stdout?.setEncoding("utf8");
+        server.stdout?.on("data", (chunk: string) => {
+          seen += chunk;
+          const match = /http:\/\/127\.0\.0\.1:\d+\//.exec(seen);
+          if (match !== null) {
+            clearTimeout(timer);
+            resolve(match[0]);
+          }
+        });
+        server.once("exit", (code) => reject(new Error(`exited ${String(code)}: ${seen}`)));
+      });
+      const res = await fetch(`${url}api/dashboard`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as {
+        overview: {
+          local: {
+            todayRuns: number;
+            todayCostUsd: number | null;
+            todayUnpricedRuns: number | null;
+            costComplete: boolean;
+            costAvailable: boolean;
+            maxConcurrent: number | null;
+            smallMaxWorkers: number | null;
+            maxPerHour: number | null;
+            runners: string[];
+          };
+        };
+        machineViews: {
+          self: boolean;
+          policy: { known: boolean; concurrency: number | null; maxWorkers: number | null } | null;
+        }[];
+      };
+      const local = body.overview.local;
+      assert.equal(local.maxConcurrent, 4, "worker.concurrency reaches the page");
+      assert.equal(local.maxPerHour, 18);
+      assert.equal(local.smallMaxWorkers, 6, "small.maxWorkers is a separate figure");
+      assert.deepEqual(local.runners, ["cheap"], "runners come from policy.yaml");
+      assert.equal(local.todayRuns, 1, "the local run is counted");
+      assert.equal(local.todayCostUsd, 1.25, "the price in the run log is reported");
+      assert.equal(local.todayUnpricedRuns, 0, "the one run today is inside the figure");
+      assert.equal(local.costComplete, true);
+      assert.equal(local.costAvailable, true);
+      const own = body.machineViews.find((machine) => machine.self);
+      assert.equal(own?.policy?.known, true, "this machine's policy is known");
+      assert.equal(own?.policy?.concurrency, 4);
+    } finally {
+      server.kill("SIGTERM");
+      await new Promise<void>((resolve) => server.once("exit", () => resolve()));
+    }
+  });
+
+  it("never reports an unknown local cost as zero", async () => {
+    const home = join(tmp, "carol");
+    const env = testEnv({ OGURI_HOME: home, NO_COLOR: "1" });
+    await exec(
+      process.execPath,
+      [CLI, "init", "--repo", remotePath, "--network", "acme", "--agent", "carol-cursor"],
+      { env },
+    );
+    const server = spawn(process.execPath, [CLI, "web", "--port", "0", "--direct"], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const url = await new Promise<string>((resolve, reject) => {
+        let seen = "";
+        const timer = setTimeout(() => reject(new Error(`no URL printed: ${seen}`)), 20_000);
+        server.stdout?.setEncoding("utf8");
+        server.stdout?.on("data", (chunk: string) => {
+          seen += chunk;
+          const match = /http:\/\/127\.0\.0\.1:\d+\//.exec(seen);
+          if (match !== null) {
+            clearTimeout(timer);
+            resolve(match[0]);
+          }
+        });
+        server.once("exit", (code) => reject(new Error(`exited ${String(code)}: ${seen}`)));
+      });
+      const body = (await (await fetch(`${url}api/dashboard`)).json()) as {
+        overview: {
+          local: { todayCostUsd: number | null; costAvailable: boolean; costComplete: boolean };
+        };
+      };
+      assert.equal(body.overview.local.todayCostUsd, null);
+      assert.equal(body.overview.local.costAvailable, false);
+      assert.equal(
+        body.overview.local.costComplete,
+        false,
+        "an unknown figure is never a complete one",
+      );
+    } finally {
+      server.kill("SIGTERM");
+      await new Promise<void>((resolve) => server.once("exit", () => resolve()));
+    }
   });
 });

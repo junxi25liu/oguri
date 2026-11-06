@@ -21,9 +21,12 @@ import { listRuns, readConsumed, writeRunRecord, type RunRecord } from "../src/r
 import type { Candidate } from "../src/select.ts";
 import {
   parseClaudeJson,
+  parseClaudeStream,
   parseCodexJsonl,
   readSession,
   resumeArgv,
+  runnerEffort,
+  runnerModel,
   validSessionId,
 } from "../src/session.ts";
 import { Worker } from "../src/worker.ts";
@@ -131,6 +134,65 @@ describe("session ids", () => {
       { sessionId: "abc-123", text: "ok" },
     );
     assert.deepEqual(parseClaudeJson("plain text, not json"), {});
+  });
+
+  it("reads the model the service says it ran, and keeps it out of the answer", () => {
+    // A result event names the model it actually answered with. That is the
+    // evidence `run.json` needs; a run may fall back to another model.
+    const read = parseClaudeJson(
+      JSON.stringify({
+        type: "result",
+        session_id: "abc-123",
+        result: "ok",
+        modelUsage: { opus: { costUSD: 0.4 }, haiku: { costUSD: 0.1 } },
+      }),
+    );
+    assert.deepEqual(read, {
+      sessionId: "abc-123",
+      text: "ok",
+      modelsUsage: ["opus", "haiku"],
+    });
+    assert.deepEqual(parseClaudeJson(claudeOutput("hi")), {
+      sessionId: SESSION,
+      text: "hi",
+    });
+  });
+
+  it("reads the model from a stream's init line", () => {
+    const stream = [
+      JSON.stringify({ type: "system", subtype: "init", session_id: SESSION, model: "m-1" }),
+      JSON.stringify({ type: "result", session_id: SESSION, result: "done" }),
+    ].join("\n");
+    assert.deepEqual(parseClaudeStream(stream), {
+      sessionId: SESSION,
+      text: "done",
+      modelInitialized: "m-1",
+    });
+  });
+
+  it("refuses a model name that could be a flag", () => {
+    assert.equal(parseClaudeJson('{"model":"--dangerously-skip-permissions"}').model, undefined);
+  });
+
+  it("reads the effort a runner's argv passes, and nothing when it passes none", () => {
+    assert.equal(runnerEffort(["claude", "-p", "--effort", "max"]), "max");
+    assert.equal(runnerEffort(["claude", "-p", "--effort=high"]), "high");
+    assert.equal(runnerEffort(["claude", "-p", "--model", "m"]), undefined);
+    // A missing value, or one that would read as a flag, is not an effort.
+    assert.equal(runnerEffort(["claude", "-p", "--effort"]), undefined);
+    assert.equal(runnerEffort(["claude", "-p", "--effort", "--tools="]), undefined);
+  });
+
+  it("reads the model and effort a runner's argv names", () => {
+    // The fallback when the output prints neither: the cheap models behind an
+    // Anthropic-compatible endpoint report usage but no model at all.
+    assert.equal(runnerModel(["claude", "-p", "--model", "my-cheap-model"]), "my-cheap-model");
+    assert.equal(
+      runnerModel(["codex", "exec", "-m", "example-codex-model"]),
+      "example-codex-model",
+    );
+    assert.equal(runnerModel(["claude", "-p"]), undefined);
+    assert.equal(runnerModel(["claude", "-p", "--model"]), undefined);
   });
 
   it("reads codex-jsonl: the first thread.started id and the last agent message", () => {
@@ -325,11 +387,13 @@ describe("follow-up detection", () => {
   it("watches recent runs and unfinished tasks, never one in flight", () => {
     const now = Date.now();
     const old = new Date(now - 20 * DAY).toISOString();
+    const withoutThread = record({ taskId: "01JDDDDDDDDDDDDDDDDDDDDDDD" });
+    delete withoutThread.thread;
     const runs = [
       record({ taskId: ID_A }),
       record({ taskId: ID_B, startedAt: old, finishedAt: old }),
       record({ taskId: "01JCCCCCCCCCCCCCCCCCCCCCCC", outcome: "running" }),
-      record({ taskId: "01JDDDDDDDDDDDDDDDDDDDDDDD", thread: undefined }),
+      withoutThread,
     ];
     const ids = (active: string[], exclude: string[] = []) =>
       watchedRuns(runs, {
@@ -508,6 +572,83 @@ describe("worker with sessions and follow-ups", () => {
     ]);
   });
 
+  it("records the requested model and effort apart from what the service reported", async () => {
+    // The gap this closes: `run.json` had one model field, so a request and an
+    // observation were the same fact. They are not: the endpoint named here
+    // reports usage but never says which model answered.
+    const fake = fakeBackend([{ id: ID_A }]);
+    const argv = [
+      "claude",
+      "-p",
+      "--output-format",
+      "json",
+      "--model",
+      "my-cheap-model",
+      "--effort",
+      "high",
+    ];
+    const { executor } = recording(() => claudeOutput("done"));
+    const w = worker(fake.backend, executor, { runners: { claude: { ...SESSION_RUNNER, argv } } });
+    await w.pass();
+    await w.idle();
+
+    const [run] = await listRuns(home);
+    assert.equal(run?.modelRequested, "my-cheap-model");
+    assert.equal(run?.effortRequested, "high");
+    assert.equal(
+      run?.modelReported,
+      undefined,
+      "the service named no model, so nothing may claim it used one",
+    );
+    assert.equal(run?.sessionId, SESSION);
+  });
+
+  it("records the price a result event reports, so it survives the log", async () => {
+    const fake = fakeBackend([{ id: ID_A }]);
+    const { executor } = recording(() =>
+      JSON.stringify({
+        type: "result",
+        session_id: SESSION,
+        result: "done",
+        total_cost_usd: 3.25,
+      }),
+    );
+    const w = worker(fake.backend, executor);
+    await w.pass();
+    await w.idle();
+    assert.equal((await listRuns(home))[0]?.costUsd, 3.25);
+  });
+
+  it("records what the service reported, keeping the request beside it", async () => {
+    // A run may fall back to another model. Both facts are kept: what was
+    // asked for and what answered, with neither overwriting the other.
+    const fake = fakeBackend([{ id: ID_A }]);
+    const { executor } = recording(() =>
+      JSON.stringify({
+        type: "result",
+        session_id: SESSION,
+        result: "done",
+        modelUsage: { opus: { costUSD: 1 } },
+      }),
+    );
+    const w = worker(fake.backend, executor, {
+      runners: {
+        claude: {
+          ...SESSION_RUNNER,
+          argv: [...SESSION_RUNNER.argv, "--model", "sonnet"],
+        },
+      },
+    });
+    await w.pass();
+    await w.idle();
+    const [run] = await listRuns(home);
+    assert.equal(run?.modelReported, "opus");
+    assert.equal(run?.modelSource, "result-usage");
+    assert.deepEqual(run?.modelsUsage, ["opus"]);
+    assert.equal(run?.modelRequested, "sonnet", "the request is not overwritten");
+    assert.equal(run?.effortRequested, undefined, "an argv with no --effort requests none");
+  });
+
   it("acknowledges once, even when the task is claimed here again", async () => {
     const tasks: FakeTask[] = [{ id: ID_A, title: "Flaky", origin: ORIGIN, maxAttempts: 3 }];
     const fake = fakeBackend(tasks);
@@ -623,6 +764,98 @@ describe("worker with sessions and follow-ups", () => {
     await w.idle();
     assert.equal(again.followups, undefined);
     assert.equal(requests.length, 2);
+  });
+
+  it("reports a rejected result.json on a follow-up as a failure, never as an answer", async () => {
+    // A follow-up on a task this worker did not create publishes nothing to the
+    // task, so the chat and the run record are the only places it can be seen.
+    const tasks: FakeTask[] = [{ id: ID_A, title: "Rename", origin: ORIGIN }];
+    const fake = fakeBackend(tasks);
+    let n = 0;
+    const executor: Executor = async (request) => {
+      n += 1;
+      await mkdir(request.logDir, { recursive: true });
+      if (n > 1) {
+        await writeFile(join(request.logDir, "result.json"), '{"summary": 3}');
+      }
+      const text = claudeOutput(n === 1 ? "Renamed." : "Cancel renamed too.");
+      await writeFile(join(request.logDir, "stdout.log"), text);
+      return result({ stdoutTail: text });
+    };
+    const w = worker(fake.backend, executor);
+    await w.pass();
+    await w.idle();
+    tasks[0] = {
+      ...tasks[0],
+      id: ID_A,
+      state: "completed",
+      assignee: ME,
+      hidden: true,
+      events: [{ action: "completed" }],
+    };
+    fake.byId.set(ID_A, tasks[0]);
+    fake.messages.push(
+      threadMessage(ID_A, "Also the cancel button.", {
+        ts: new Date(Date.now() + 5).toISOString(),
+        external: { actorName: "Bob" },
+      }),
+    );
+    await w.pass();
+    await w.idle();
+
+    const latest = (await listRuns(home)).find((run) => run.followup === true);
+    assert.equal(latest?.outcome, "failed");
+    const last = fake.sent().at(-1);
+    assert.equal(last?.relay, "attention");
+    assert.match(last?.body ?? "", /I could not finish this: its result\.json was rejected/);
+    assert.doesNotMatch(last?.body ?? "", /Cancel renamed too/);
+  });
+
+  it("reports a missing result.json on a follow-up as a failure when the runner requires one", async () => {
+    const tasks: FakeTask[] = [{ id: ID_A, title: "Rename", origin: ORIGIN }];
+    const fake = fakeBackend(tasks);
+    let n = 0;
+    const executor: Executor = async (request) => {
+      n += 1;
+      await mkdir(request.logDir, { recursive: true });
+      // The first run submits its result; the follow-up forgets to.
+      if (n === 1) {
+        await writeFile(join(request.logDir, "result.json"), '{"summary": "Renamed."}');
+      }
+      const text = claudeOutput(n === 1 ? "Renamed." : "Cancel renamed too.");
+      await writeFile(join(request.logDir, "stdout.log"), text);
+      return result({ stdoutTail: text });
+    };
+    const w = worker(fake.backend, executor, {
+      runners: { claude: { ...SESSION_RUNNER, requireResult: true } },
+    });
+    await w.pass();
+    await w.idle();
+    tasks[0] = {
+      ...tasks[0],
+      id: ID_A,
+      state: "completed",
+      assignee: ME,
+      hidden: true,
+      events: [{ action: "completed" }],
+    };
+    fake.byId.set(ID_A, tasks[0]);
+    fake.messages.push(
+      threadMessage(ID_A, "Also the cancel button.", {
+        ts: new Date(Date.now() + 5).toISOString(),
+        external: { actorName: "Bob" },
+      }),
+    );
+    await w.pass();
+    await w.idle();
+
+    const latest = (await listRuns(home)).find((run) => run.followup === true);
+    assert.equal(latest?.outcome, "failed");
+    assert.match(latest?.note ?? "", /result\.json rejected/);
+    const last = fake.sent().at(-1);
+    assert.equal(last?.relay, "attention");
+    assert.match(last?.body ?? "", /I could not finish this: its result\.json was rejected/);
+    assert.doesNotMatch(last?.body ?? "", /Cancel renamed too/);
   });
 
   it("reopens and claims a completed task it created, with no new approval", async () => {

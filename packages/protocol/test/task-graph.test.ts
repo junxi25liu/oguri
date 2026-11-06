@@ -5,9 +5,11 @@ import {
   MalformedMessageError,
   TaskTransitionError,
   assertDependenciesMet,
+  assertNoDependencyCycle,
   assertTaskTransition,
   createMessage,
   createTask,
+  findDependencyCycle,
   parseMessage,
   parseTask,
   serializeMessage,
@@ -251,5 +253,135 @@ describe("task graph transitions", () => {
     assert.match(String(caught), new RegExp(`${DEP_B} \\(in_progress\\)`));
     assert.doesNotMatch(String(caught), new RegExp(DEP_A));
     assert.doesNotThrow(() => assertDependenciesMet(open, () => "completed"));
+  });
+});
+
+describe("relinking an unclaimed task's dependencies", () => {
+  const open = createTask({
+    id: TASK,
+    creator: "komdosh-claude",
+    title: "Graph",
+    dependsOn: [DEP_A, DEP_B],
+  });
+  const relinked = (change: Partial<Task>, drop: (keyof Task)[] = []): Task => {
+    const next = { ...open, action: "relinked", ...change } as Task;
+    for (const key of drop) delete next[key];
+    return next;
+  };
+
+  it("lets the creator drop or add a dependency while the task is open", () => {
+    assert.doesNotThrow(() =>
+      assertTaskTransition(open, relinked({ dependsOn: [DEP_B] }), "komdosh-claude"),
+    );
+    assert.doesNotThrow(() =>
+      assertTaskTransition(open, relinked({ dependsOn: [DEP_A, DEP_B, PARENT] }), "komdosh-claude"),
+    );
+    // Dropping the last one leaves the field absent, which is the empty list.
+    const one = { ...open, dependsOn: [DEP_A] } as Task;
+    assert.doesNotThrow(() =>
+      assertTaskTransition(one, relinked({}, ["dependsOn"]), "komdosh-claude"),
+    );
+  });
+
+  it("refuses anyone but the creator, and a relink that changes nothing", () => {
+    assert.throws(
+      () => assertTaskTransition(open, relinked({ dependsOn: [DEP_B] }), "bob-codex"),
+      /only the task creator may change dependencies/,
+    );
+    assert.throws(
+      () => assertTaskTransition(open, relinked({}), "komdosh-claude"),
+      /must change the dependencies/,
+    );
+  });
+
+  it("refuses once the task is claimed, started, blocked, stuck, or finished", () => {
+    for (const state of ["claimed", "in_progress", "blocked", "stuck", "completed"] as const) {
+      const started = { ...open, state, assignee: "alice-cursor" } as Task;
+      assert.throws(
+        () =>
+          assertTaskTransition(
+            started,
+            { ...started, action: "relinked", dependsOn: [DEP_B] } as Task,
+            "komdosh-claude",
+          ),
+        /only while the task is open/,
+        state,
+      );
+    }
+  });
+
+  it("changes nothing but dependencies, and no other action may change them", () => {
+    assert.throws(
+      () =>
+        assertTaskTransition(
+          open,
+          relinked({ dependsOn: [DEP_B], title: "Sneaky" }),
+          "komdosh-claude",
+        ),
+      /only a refinement may change the task title/,
+    );
+    assert.throws(
+      () =>
+        assertTaskTransition(
+          open,
+          relinked({ dependsOn: [DEP_B], requires: ["gpu"] }),
+          "komdosh-claude",
+        ),
+      /immutable/,
+    );
+    assert.throws(
+      () =>
+        assertTaskTransition(
+          open,
+          { ...open, action: "retargeted", target: "alice-cursor", dependsOn: [DEP_B] } as Task,
+          "komdosh-claude",
+        ),
+      /immutable/,
+    );
+    assert.throws(
+      () =>
+        assertTaskTransition(
+          open,
+          { ...open, action: "refined", dependsOn: [DEP_B] } as Task,
+          "komdosh-claude",
+        ),
+      /immutable/,
+    );
+  });
+
+  it("finds a cycle through other tasks", () => {
+    const edges: Record<string, string[]> = {
+      [DEP_A]: [DEP_B],
+      [DEP_B]: [PARENT],
+      [PARENT]: [TASK],
+    };
+    const dependsOf = (id: string): string[] | undefined => edges[id];
+    assert.deepEqual(findDependencyCycle(TASK, [DEP_A], dependsOf), [
+      TASK,
+      DEP_A,
+      DEP_B,
+      PARENT,
+      TASK,
+    ]);
+    assert.equal(
+      findDependencyCycle(TASK, [DEP_A], () => undefined),
+      undefined,
+    );
+    let caught: unknown;
+    try {
+      assertNoDependencyCycle(TASK, [DEP_A], dependsOf);
+    } catch (error) {
+      caught = error;
+    }
+    assert.equal(code(caught), "DEPENDENCY_CYCLE");
+  });
+
+  it("round-trips through the wire format with the new action", () => {
+    const task = relinked({ dependsOn: [DEP_B] });
+    const base = message(task);
+    const update = { ...base, header: { ...base.header, kind: "status" as const } };
+    const parsed = parseMessage(serializeMessage(update)).header.task;
+    assert.equal(parsed?.action, "relinked");
+    assert.deepEqual(parsed?.dependsOn, [DEP_B]);
   });
 });

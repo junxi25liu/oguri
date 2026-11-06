@@ -1,6 +1,7 @@
 import type { OguriConfig } from "@oguri/core";
 
 import type { Method } from "../protocol.ts";
+import type { RunScope } from "./run-scope.ts";
 
 /**
  * How the MCP server reaches oguri.
@@ -17,6 +18,8 @@ import type { Method } from "../protocol.ts";
  */
 export interface Backend {
   readonly mode: "daemon" | "direct";
+  /** Present when this process was started for a worker's run (ADR 0036). */
+  readonly runScope?: RunScope;
   /**
    * `network` overrides which network this ONE call is about.
    *

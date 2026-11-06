@@ -1,4 +1,10 @@
-import { type ApprovalRecord, loadLocalPolicy, policyTemplate, redactPolicy } from "@oguri/core";
+import {
+  type ApprovalRecord,
+  effectiveConcurrency,
+  loadLocalPolicy,
+  policyTemplate,
+  redactPolicy,
+} from "@oguri/core";
 import { assertRoomId } from "@oguri/protocol";
 import { ago, bold, cyan, dim, errline, green, json, out, red, yellow } from "../output.ts";
 
@@ -110,8 +116,11 @@ export async function cmdPolicy(ctx: Ctx): Promise<number> {
     `  enabled      ${worker.enabled ? yellow(`yes — runners: ${Object.keys(worker.runners).join(", ")}`) : dim("no — oguri never starts an agent")}`,
   );
   if (worker.enabled) {
+    const source = resolved.policy.superagent.small.enabled
+      ? `superagent.small.maxWorkers; worker.concurrency is ${String(worker.concurrency)}`
+      : "worker.concurrency";
     out(
-      `  limits       ${String(worker.concurrency)} at once, ${String(worker.maxPerHour)}/hour, ${String(worker.timeoutMinutes)} min ${dim("(this spends your plan)")}`,
+      `  limits       ${String(effectiveConcurrency(resolved.policy))} at once ${dim(`(${source})`)}, ${String(worker.maxPerHour)}/hour, ${String(worker.timeoutMinutes)} min ${dim("(this spends your plan)")}`,
     );
     out(
       `  trusted      ${worker.trustedRequesters.length === 0 ? dim("none — remote tasks wait for approval") : worker.trustedRequesters.join(", ")}`,

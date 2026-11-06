@@ -54,7 +54,7 @@ before(async () => {
   home = join(tmp, "home");
   const remote = join(tmp, "transport.git");
   await exec("git", ["init", "--bare", "--quiet", "--initial-branch=main", remote]);
-  await oguri("init", "--repo", remote, "--network", "acme", "--agent", "liu-claude");
+  await oguri("init", "--repo", remote, "--network", "acme", "--agent", "alice-claude");
   await writeFile(
     join(home, "policy.yaml"),
     [
@@ -94,7 +94,7 @@ describe("oguri team", () => {
     const result = await oguri("team");
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /machine:laptop/);
-    assert.match(result.stdout, /liu-claude/);
+    assert.match(result.stdout, /alice-claude/);
     assert.match(result.stdout, /typescript, sqlite/);
     // The local half of the screen: the runners this machine may start, and
     // how many workers the small superagent may deploy at once.
@@ -131,7 +131,7 @@ describe("oguri team", () => {
       await oguri(
         "agent",
         "add",
-        "liu-codex",
+        "alice-codex",
         "--repo",
         join(tmp, "transport.git"),
         "--tool",
@@ -146,8 +146,8 @@ describe("oguri team", () => {
     const result = await oguri("team");
     assert.equal(result.code, 0, result.stderr);
     const lines = result.stdout.split("\n");
-    const claude = lines.findIndex((line) => line.includes("liu-claude"));
-    const codex = lines.findIndex((line) => line.includes("liu-codex"));
+    const claude = lines.findIndex((line) => line.includes("alice-claude"));
+    const codex = lines.findIndex((line) => line.includes("alice-codex"));
     assert.ok(claude >= 0 && codex > claude, result.stdout);
     assert.match(lines[claude + 1] ?? "", /typescript, sqlite/);
     assert.doesNotMatch(lines[codex + 1] ?? "", /typescript, sqlite/);

@@ -28,6 +28,11 @@ export interface SessionRead {
   sessionId?: string;
   /** The agent's final answer, when the output format carries one apart from the log. */
   text?: string;
+  /** A model label in output, with its exact source; never proof of backend weights. */
+  model?: string;
+  modelSource?: "assistant-message" | "result-model" | "result-usage" | "cli-event";
+  modelInitialized?: string;
+  modelsUsage?: string[];
 }
 
 export function sessionFile(runDir: string): string {
@@ -49,6 +54,115 @@ function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+/** A model name as an agent CLI reports it: never a flag, never whitespace. */
+const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+
+/** Validate a label without interpreting it as a backend identity. */
+function modelOf(object: Record<string, unknown>): string | undefined {
+  const named = object["model"];
+  return typeof named === "string" && MODEL_NAME.test(named) ? named : undefined;
+}
+
+/** Keep every usage label; cost cannot identify a single answering model. */
+function usageModels(object: Record<string, unknown>): string[] {
+  const usage = record(object["modelUsage"]);
+  return usage === null ? [] : Object.keys(usage).filter((name) => MODEL_NAME.test(name));
+}
+
+function claudeEvidence(events: readonly Record<string, unknown>[]): Partial<SessionRead> {
+  let modelInitialized: string | undefined;
+  let model: string | undefined;
+  let modelSource: SessionRead["modelSource"];
+  let modelsUsage: string[] = [];
+  for (const event of events) {
+    if (event["type"] === "system" && event["subtype"] === "init") {
+      modelInitialized = modelOf(event) ?? modelInitialized;
+    }
+    if (event["type"] === "assistant") {
+      const message = record(event["message"]);
+      const named = message === null ? undefined : modelOf(message);
+      if (named !== undefined) {
+        model = named;
+        modelSource = "assistant-message";
+      }
+    }
+    if (event["type"] === "result") {
+      const labels = usageModels(event);
+      if (labels.length > 0) modelsUsage = labels;
+      const named = modelOf(event);
+      if (model === undefined && named !== undefined) {
+        model = named;
+        modelSource = "result-model";
+      }
+    }
+  }
+  if (model === undefined && modelsUsage.length === 1) {
+    model = modelsUsage[0];
+    modelSource = "result-usage";
+  }
+  return {
+    ...(model === undefined ? {} : { model }),
+    ...(modelSource === undefined ? {} : { modelSource }),
+    ...(modelInitialized === undefined ? {} : { modelInitialized }),
+    ...(modelsUsage.length === 0 ? {} : { modelsUsage }),
+  };
+}
+
+/** `codex exec --json` names the model on thread and turn events, sometimes nested. */
+function codexModel(event: Record<string, unknown>): string | undefined {
+  const declared = record(record(event["session"])?.["model"]);
+  const turn = record(event["turn"]);
+  return (
+    modelOf(event) ??
+    (typeof declared?.["id"] === "string" ? modelOf({ model: declared["id"] }) : undefined) ??
+    (turn === null ? undefined : modelOf(turn))
+  );
+}
+
+/**
+ * The attention level a runner's argv passes, when it passes one.
+ *
+ * This is the evidence there is: the services do not echo the level back, so
+ * the flag the run actually started with is what `run.json` records.
+ */
+export function runnerEffort(argv: readonly string[]): string | undefined {
+  for (let index = 0; index < argv.length; index += 1) {
+    const part = argv[index] as string;
+    if (part === "--effort") {
+      const value = argv[index + 1];
+      return value === undefined || value.startsWith("-") || !MODEL_NAME.test(value)
+        ? undefined
+        : value;
+    }
+    if (part.startsWith("--effort=")) {
+      const value = part.slice("--effort=".length);
+      return MODEL_NAME.test(value) ? value : undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The model a runner's argv names, when it names one.
+ *
+ * The fallback when the output does not say: a cheap model behind an
+ * Anthropic-compatible endpoint prints no `modelUsage`, and the flag the run
+ * started with is still the truth about which model was asked for.
+ */
+export function runnerModel(argv: readonly string[]): string | undefined {
+  for (let index = 0; index < argv.length; index += 1) {
+    const part = argv[index] as string;
+    const value =
+      part === "--model" || part === "-m"
+        ? argv[index + 1]
+        : part.startsWith("--model=")
+          ? part.slice("--model=".length)
+          : undefined;
+    if (value !== undefined) return MODEL_NAME.test(value) ? value : undefined;
+  }
+  return undefined;
 }
 
 /** `claude -p --output-format json`: one object with `session_id` and `result`. */
@@ -90,9 +204,13 @@ export function parseClaudeJson(stdout: string): SessionRead {
   if (object === null || object === undefined) return {};
   const id = object["session_id"];
   const text = object["result"];
+  const events = (Array.isArray(parsed) ? parsed : [parsed])
+    .map(record)
+    .filter((event): event is Record<string, unknown> => event !== null);
   return {
     ...(validSessionId(id) ? { sessionId: id } : {}),
     ...(typeof text === "string" && text.trim().length > 0 ? { text } : {}),
+    ...claudeEvidence(events),
   };
 }
 
@@ -109,26 +227,33 @@ export function parseClaudeJson(stdout: string): SessionRead {
 export function parseClaudeStream(stdout: string): SessionRead {
   let sessionId: string | undefined;
   let text: string | undefined;
+  const events: Record<string, unknown>[] = [];
   for (const line of stdout.split("\n")) {
-    if (!line.includes("session_id") && !line.includes('"result"')) continue;
+    if (!line.includes("session_id") && !line.includes('"result"') && !line.includes("model"))
+      continue;
     let value: Record<string, unknown>;
     try {
-      value = JSON.parse(line) as Record<string, unknown>;
+      const parsed = record(JSON.parse(line));
+      if (parsed === null) continue;
+      value = parsed;
     } catch {
       continue;
     }
     if (validSessionId(value["session_id"])) sessionId = value["session_id"];
     if (value["type"] === "result" && typeof value["result"] === "string") text = value["result"];
+    events.push(value);
   }
   return {
     ...(sessionId === undefined ? {} : { sessionId }),
     ...(text === undefined ? {} : { text }),
+    ...claudeEvidence(events),
   };
 }
 
 export function parseCodexJsonl(stdout: string): SessionRead {
   let sessionId: string | undefined;
   let text: string | undefined;
+  let model: string | undefined;
   for (const line of stdout.split("\n")) {
     if (!line.trimStart().startsWith("{")) continue;
     let event: Record<string, unknown> | null;
@@ -142,6 +267,9 @@ export function parseCodexJsonl(stdout: string): SessionRead {
       const id = event["type"] === "thread.started" ? event["thread_id"] : event["session_id"];
       if (validSessionId(id)) sessionId = id;
     }
+    // `codex exec --json` names the model on its thread and turn events.
+    const named = codexModel(event);
+    if (named !== undefined) model = named;
     const item = record(event["item"]);
     if (event["type"] === "item.completed" && item?.["type"] === "agent_message") {
       const message = item["text"];
@@ -151,6 +279,7 @@ export function parseCodexJsonl(stdout: string): SessionRead {
   return {
     ...(sessionId === undefined ? {} : { sessionId }),
     ...(text === undefined ? {} : { text }),
+    ...(model === undefined ? {} : { model, modelSource: "cli-event" as const }),
   };
 }
 

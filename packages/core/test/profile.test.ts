@@ -116,7 +116,7 @@ describe("agent profile", () => {
 
   it("rejects local paths and credentials before they enter permanent history", async () => {
     await assert.rejects(
-      () => network.publishAgentProfile({ workspace: "/Users/alice/private/payments" }),
+      () => network.publishAgentProfile({ workspace: "/home/user/private/payments" }),
       /not a local path/,
     );
     await assert.rejects(

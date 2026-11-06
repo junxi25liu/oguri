@@ -251,7 +251,7 @@ describe("feishu-app delivery", () => {
         ? { status: 400, body: { code: 99991663, msg: "Invalid access token for authorization." } }
         : { status: 200, body: { code: 0, msg: "success" } };
     const result = await sendPush(channel(), event(), { feishuTokens: tokens });
-    assert.equal(result.ok, true, result.error);
+    assert.equal(result.ok, true, result.error ?? "");
     assert.equal(feishu.tokenCalls.length, 2);
     assert.deepEqual(
       feishu.sends.map((hit) => hit.authorization),

@@ -106,6 +106,26 @@ export function taskGraphInput(ctx: Ctx): {
   };
 }
 
+/** `--add-depends-on` / `--remove-depends-on` of `task update relinked`, checked before anything is sent. */
+function relinkInput(ctx: Ctx): { addDependsOn?: string[]; removeDependsOn?: string[] } {
+  const read = (key: string): string[] => {
+    const ids = list(ctx, key);
+    for (const id of ids) {
+      if (!isUlid(id)) usage(`--${key} must be a task id (ULID), got '${id}'`);
+    }
+    if (new Set(ids).size !== ids.length) usage(`--${key} names a task twice`);
+    return ids;
+  };
+  const addDependsOn = read("add-depends-on");
+  const removeDependsOn = read("remove-depends-on");
+  const both = addDependsOn.filter((id) => removeDependsOn.includes(id));
+  if (both.length > 0) usage(`${both.join(", ")} is both added and removed`);
+  return {
+    ...(addDependsOn.length === 0 ? {} : { addDependsOn }),
+    ...(removeDependsOn.length === 0 ? {} : { removeDependsOn }),
+  };
+}
+
 export async function cmdTask(ctx: Ctx): Promise<number> {
   const sub = ctx.positionals[1];
   if (sub === undefined) {
@@ -212,6 +232,10 @@ export async function cmdTask(ctx: Ctx): Promise<number> {
         }
         const title = str(ctx, "title");
         const refs = list(ctx, "ref");
+        const relink = relinkInput(ctx);
+        if (action !== "relinked" && Object.keys(relink).length > 0) {
+          usage("--add-depends-on and --remove-depends-on apply only to the 'relinked' action");
+        }
         const message = await be.call<Message>("taskUpdate", {
           room,
           taskId,
@@ -220,6 +244,7 @@ export async function cmdTask(ctx: Ctx): Promise<number> {
             body,
             ...(refs.length === 0 ? {} : { refs }),
             ...(title === undefined ? {} : { title }),
+            ...relink,
             ...(target === undefined && !bool(ctx, "free")
               ? {}
               : { target: bool(ctx, "free") ? null : target }),
@@ -230,6 +255,14 @@ export async function cmdTask(ctx: Ctx): Promise<number> {
         else {
           const state = message.header.task?.state ?? "unknown";
           out(green(`✓ task ${taskId} → ${state}`) + dim(` ${message.header.id}`));
+          if (action === "relinked") {
+            const now = message.header.task?.dependsOn ?? [];
+            out(
+              dim(
+                now.length === 0 ? "  no dependencies now" : `  now depends on ${now.join(", ")}`,
+              ),
+            );
+          }
           if (message.header.needs === "human") {
             out(dim("  parked for a critical human decision; attribution remains cooperative."));
           }

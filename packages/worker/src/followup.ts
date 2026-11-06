@@ -11,13 +11,25 @@
  * which message wakes which task is testable without a backend.
  */
 
-import { describeError, type TaskDetail, type WorkerPolicy } from "@oguri/core";
+import {
+  describeError,
+  findTier,
+  type RunnerGate,
+  type TaskDetail,
+  type WorkerPolicy,
+} from "@oguri/core";
 import type { Backend } from "@oguri/daemon";
 import { EXTERNAL_CONTEXT_TAG, type Message, type Task } from "@oguri/protocol";
 
 import type { ThreadLine } from "./prompt.ts";
 import { listRuns, readConsumed, type RunRecord } from "./runs.ts";
-import { parseRunnerHint, resolveRunner, type Candidate, type Skipped } from "./select.ts";
+import {
+  effortSourceOf,
+  parseRunnerHint,
+  resolveRunner,
+  type Candidate,
+  type Skipped,
+} from "./select.ts";
 
 const DAY_MS = 24 * 60 * 60_000;
 /** One message is cut to this in a prompt; the whole text stays in the thread. */
@@ -270,6 +282,8 @@ export interface FollowupOptions {
   now: number;
   /** Log a line once per key. */
   note: (key: string, line: string) => void;
+  /** Which runners may be used here beyond the allow-list (ADR 0034). */
+  gate?: RunnerGate;
 }
 
 /**
@@ -342,22 +356,72 @@ export async function findFollowups(
       continue;
     }
     // The runner of the earlier run, so the session and directory match. Its
-    // argv still comes from this machine's policy, never from the record.
-    const resolved = resolveRunner(policy, previous.runner);
+    // argv still comes from this machine's policy, never from the record. The
+    // task's effort hint is re-read and re-checked against the allow-list, so a
+    // follow-up runs at the same level. An unlisted level is ignored here: the
+    // first run already reported it, and a follow-up must not be dropped for it.
+    //
+    // A person's newest message may name its own level on its first line
+    // (`effort: high`), for this run only (ADR 0034). It is checked against the
+    // same allow-list, and a level that is not on it is said once rather than
+    // silently replaced.
+    const hint = parseRunnerHint(detail.definition);
+    const newest = accepted.at(-1) as Message;
+    const asked = followupEffort(newest.body);
+    // The level the task itself runs at: its own line, else its tier's, when
+    // the earlier run's runner is in that tier.
+    const tier = hint.tier === undefined ? undefined : findTier(policy, hint.tier);
+    const tierEffort = tier?.runners.includes(previous.runner) === true ? tier.effort : undefined;
+    const taskEffort = hint.effort ?? tierEffort;
+    const listed = policy.runners[previous.runner]?.efforts ?? [];
+    const own = asked.effort !== undefined && listed.includes(asked.effort);
+    if (asked.effort !== undefined && !own) {
+      note(
+        `followup-effort:${newest.header.id}`,
+        `${previous.taskId} follow-up effort '${asked.effort}' is not allowed for this runner (allowed: ${listed.join(", ") || "none"}); running at the task's level`,
+      );
+    }
+    const resolved = resolveRunner(
+      policy,
+      previous.runner,
+      own ? asked.effort : taskEffort,
+      options.gate,
+    );
     if ("error" in resolved) {
       skip(resolved.error);
       continue;
     }
+    if (own && resolved.conflictedEffort !== undefined) {
+      note(
+        `followup-effort:${newest.header.id}`,
+        `${previous.taskId} follow-up ${resolved.conflictedEffort}`,
+      );
+    }
+    const source = effortSourceOf(
+      own ? asked.effort : taskEffort,
+      resolved,
+      own ? "follow-up" : hint.effort === undefined ? "tier" : "task",
+    );
     const task = detail.task;
+    const lines = threadLines(accepted, agentId);
+    // The hint is for the worker, not the agent: the run reads the message without it.
+    if (asked.effort !== undefined) {
+      const last = lines.at(-1);
+      if (last !== undefined) last.body = asked.text;
+    }
     jobs.push({
       candidate: {
         room: previous.room,
         taskId: task.id,
         title: task.title,
         creator: task.creator,
-        prompt: parseRunnerHint(detail.definition).prompt,
+        prompt: hint.prompt,
         runner: resolved.name,
         argv: resolved.argv,
+        ...(hint.tier === undefined ? {} : { tier: hint.tier }),
+        ...(hint.tierReason === undefined ? {} : { tierReason: hint.tierReason }),
+        ...(hint.escalated === undefined ? {} : { escalated: hint.escalated }),
+        ...source,
         ...(resolved.workdir === undefined ? {} : { workdir: resolved.workdir }),
         worktree: resolved.worktree,
         ...(resolved.resume === undefined ? {} : { resume: resolved.resume }),
@@ -367,15 +431,36 @@ export async function findFollowups(
         relation: "followup",
         attempt: task.attempt ?? 0,
         ...(task.maxAttempts === undefined ? {} : { maxAttempts: task.maxAttempts }),
+        ...(task.parent === undefined ? {} : { parent: task.parent }),
+        ...(task.dependsOn === undefined || task.dependsOn.length === 0
+          ? {}
+          : { dependsOn: [...task.dependsOn] }),
+        priority: detail.priority,
       },
       followup: {
         task,
         retake,
         previous,
-        messages: threadLines(accepted, agentId),
+        messages: lines,
         conversation: conversationOf(messages, thread, agentId, trusted),
       },
     });
   }
   return { jobs, skipped };
+}
+
+/**
+ * A follow-up's own `effort: <level>` first line, and the message without it.
+ *
+ * Only `effort:` is read here. A follow-up continues the task's session, so it
+ * keeps the runner that session belongs to; a `runner:` or `tier:` line in a
+ * person's message is just text. The level is still only a request: the
+ * runner's `efforts` list decides whether it is used.
+ */
+export function followupEffort(body: string): { effort?: string; text: string } {
+  const hint = parseRunnerHint(body);
+  if (hint.effort === undefined || hint.runner !== undefined || hint.tier !== undefined) {
+    return { text: body };
+  }
+  return { effort: hint.effort, text: hint.prompt };
 }

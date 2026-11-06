@@ -3,7 +3,17 @@ export type { DaemonOptions } from "./daemon.ts";
 
 export { DaemonClient, DaemonUnavailableError, DaemonRequestError } from "./client.ts";
 
-export { openBackend } from "./backend.ts";
+export {
+  MAX_PARENT_HOPS,
+  RunScope,
+  RunScopeError,
+  RunScopedBackend,
+  isDescendant,
+  openBackend,
+  runOf,
+  scopeToRun,
+  taskDepth,
+} from "./backend.ts";
 export type { Backend, OpenBackendOptions } from "./backend.ts";
 
 export { SyncLoop } from "./loop.ts";

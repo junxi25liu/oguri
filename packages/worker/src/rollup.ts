@@ -17,10 +17,13 @@ import { describeError, hasSecrets, type Agenda, type TaskDetail } from "@oguri/
 import type { Backend } from "@oguri/daemon";
 import { isTerminalTaskState } from "@oguri/protocol";
 
+import { SUMMARY_LIMIT } from "./summary.ts";
+
 /** Every roll-up note starts with this, which is how a later pass finds it. */
 export const ROLLUP_NOTE_PREFIX = "Roll-up: subtasks need attention";
 const MAX_REFS = 64;
 const MAX_TITLE = 120;
+const MAX_CHILD_SUMMARY = 160;
 const STALLED = new Set<string>(["cancelled", "blocked", "stuck"]);
 
 export interface RollupChild {
@@ -31,6 +34,8 @@ export interface RollupChild {
   needsHuman: boolean;
   /** Refs of the completing event, when the child completed. */
   refs: string[];
+  /** First line of the completing event, bounded for the parent's report. */
+  summary: string;
 }
 
 export interface RollupResult {
@@ -59,12 +64,30 @@ function childOf(detail: TaskDetail): RollupChild {
     needsHuman:
       (detail.task.state === "blocked" || detail.task.state === "stuck") && last?.needs === "human",
     refs: detail.task.state === "completed" ? [...(completion?.refs ?? [])] : [],
+    summary:
+      detail.task.state === "completed"
+        ? Array.from(completion?.body.split(/\r?\n/, 1)[0]?.trim() ?? "")
+            .slice(0, MAX_CHILD_SUMMARY)
+            .join("")
+        : "",
   };
 }
 
 function line(child: RollupChild): string {
   const refs = child.refs.length === 0 ? "" : ` — ${child.refs.join(", ")}`;
-  return `- ${child.taskId} ${title(child.title)}${refs}`;
+  const summary = child.summary.length === 0 ? "" : ` — ${child.summary}`;
+  return `- ${child.taskId} ${title(child.title)}${refs}${summary}`;
+}
+
+/** Keep whole child lines, with room to say that the list was cut. */
+function bounded(body: string): string {
+  if (Buffer.byteLength(body, "utf8") <= SUMMARY_LIMIT) return body;
+  const note = "\n\n(roll-up truncated)";
+  const head = Buffer.from(body, "utf8")
+    .subarray(0, SUMMARY_LIMIT - Buffer.byteLength(note, "utf8"))
+    .toString("utf8");
+  const newline = head.lastIndexOf("\n");
+  return `${newline === -1 ? head.replace(/�+$/, "") : head.slice(0, newline)}${note}`;
 }
 
 /**
@@ -111,7 +134,7 @@ export async function rollupParent(
     await backend.call("taskUpdate", {
       room,
       taskId: parentId,
-      input: { action, body, ...(refs.length === 0 ? {} : { refs }) },
+      input: { action, body: bounded(body), ...(refs.length === 0 ? {} : { refs }) },
     });
   };
 

@@ -12,7 +12,9 @@ import { Layout } from "../src/layout.ts";
 import { Network } from "../src/network.ts";
 import {
   DEFAULT_LOCAL_POLICY,
+  MAX_RUN_CONCURRENCY,
   approvalRequired,
+  effectiveConcurrency,
   originOf,
   parseLocalPolicy,
   policySearchPath,
@@ -111,6 +113,24 @@ describe("policy file", () => {
     assert.deepEqual(parsed.worker?.trustedRequesters, ["alice-claude"]);
   });
 
+  it("allows a run 180 minutes unless the policy says otherwise", () => {
+    assert.equal(DEFAULT_LOCAL_POLICY.worker.timeoutMinutes, 180);
+    const unset = parseLocalPolicy("worker:\n  concurrency: 2\n", "p.yaml");
+    assert.equal(unset.worker?.timeoutMinutes, 180, "no timeoutMinutes resolves to the default");
+    assert.equal(parseLocalPolicy(policyTemplate(), "template").worker?.timeoutMinutes, 180);
+    const explicit = parseLocalPolicy("worker:\n  timeoutMinutes: 60\n", "p.yaml");
+    assert.equal(explicit.worker?.timeoutMinutes, 60, "a written value keeps its value");
+    for (const bound of ["1", "1440"]) {
+      const edge = parseLocalPolicy(`worker:\n  timeoutMinutes: ${bound}\n`, "p.yaml");
+      assert.equal(edge.worker?.timeoutMinutes, Number(bound));
+    }
+    assert.throws(() => parseLocalPolicy("worker:\n  timeoutMinutes: 0\n", "p.yaml"), /1 to 1440/);
+    assert.throws(
+      () => parseLocalPolicy("worker:\n  timeoutMinutes: 1441\n", "p.yaml"),
+      /1 to 1440/,
+    );
+  });
+
   it("refuses a worker that could not run safely or as written", () => {
     const bad = (body: string, pattern: RegExp) =>
       assert.throws(() => parseLocalPolicy(`worker:\n${body}`, "p.yaml"), pattern);
@@ -120,7 +140,7 @@ describe("policy file", () => {
     bad("  runners:\n    Bad_Name: [x]\n", /invalid name 'Bad_Name'/);
     bad("  runners:\n    a: [x]\n  defaultRunner: b\n", /defaultRunner must name/);
     bad("  runners:\n    a: [x]\n  plannerRunner: b\n", /plannerRunner must name/);
-    bad("  concurrency: 0\n", /concurrency must be an integer from 1 to 8/);
+    bad("  concurrency: 0\n", /concurrency must be an integer from 1 to 20/);
     bad("  timeoutMinutes: 5000\n", /timeoutMinutes/);
     bad("  trustedRequesters: ['not valid']\n", /invalid agent id/);
     bad("  agent: claude\n", /unknown key 'worker.agent'/);
@@ -167,17 +187,17 @@ describe("policy file", () => {
         "  runners:",
         "    cheap:",
         "      argv: [claude, -p]",
-        "      model: deepseek-v4.1-flash",
+        "      model: my-cheap-model",
         "    codex:",
         "      argv: [codex, exec, '-']",
-        "      model: gpt-5-codex",
+        "      model: example-codex-model",
         "    plain: [claude, -p]",
         "",
       ].join("\n"),
       "p.yaml",
     );
-    assert.equal(parsed.worker?.runners["cheap"]?.model, "deepseek-v4.1-flash");
-    assert.equal(parsed.worker?.runners["codex"]?.model, "gpt-5-codex");
+    assert.equal(parsed.worker?.runners["cheap"]?.model, "my-cheap-model");
+    assert.equal(parsed.worker?.runners["codex"]?.model, "example-codex-model");
     assert.equal(parsed.worker?.runners["plain"]?.model, undefined);
 
     const bad = (body: string, pattern: RegExp) =>
@@ -186,6 +206,137 @@ describe("policy file", () => {
     bad("    a:\n      argv: [claude, -p]\n      model: '--danger'\n", /worker.runners.a.model/);
     bad("    a:\n      argv: [claude, -p]\n      model: ''\n", /worker.runners.a.model/);
     bad("    a:\n      argv: [claude, -p]\n      model: 'two words'\n", /worker.runners.a.model/);
+  });
+
+  it("reads whether a runner requires a result.json, and refuses anything but a boolean", () => {
+    const parsed = parseLocalPolicy(
+      [
+        "worker:",
+        "  enabled: true",
+        "  runners:",
+        "    strict:",
+        "      argv: [claude, -p]",
+        "      requireResult: true",
+        "    lax:",
+        "      argv: [claude, -p]",
+        "      requireResult: false",
+        "    plain: [claude, -p]",
+        "",
+      ].join("\n"),
+      "p.yaml",
+    );
+    assert.equal(parsed.worker?.runners["strict"]?.requireResult, true);
+    assert.equal(parsed.worker?.runners["lax"]?.requireResult, false);
+    assert.equal(parsed.worker?.runners["plain"]?.requireResult, undefined);
+    assert.throws(
+      () =>
+        parseLocalPolicy(
+          "worker:\n  runners:\n    a:\n      argv: [claude, -p]\n      requireResult: yes please\n",
+          "p.yaml",
+        ),
+      /worker\.runners\.a\.requireResult must be true or false/,
+    );
+  });
+
+  it("reads a runner's effort and the allow-list a task may pick from", () => {
+    const parsed = parseLocalPolicy(
+      [
+        "worker:",
+        "  enabled: true",
+        "  runners:",
+        "    deep:",
+        "      argv: [claude, -p]",
+        "      effort: low",
+        "      efforts: [low, high, high]",
+        "    auto:",
+        "      argv: [claude, -p]",
+        "      efforts: [medium, high]",
+        "    claude-flag:",
+        "      argv: [claude, -p, --effort, high]",
+        "",
+      ].join("\n"),
+      "p.yaml",
+    );
+    assert.equal(parsed.worker?.runners["deep"]?.effort, "low");
+    assert.deepEqual(parsed.worker?.runners["deep"]?.efforts, ["low", "high"], "deduplicated");
+    assert.equal(parsed.worker?.runners["auto"]?.effort, undefined);
+    assert.deepEqual(parsed.worker?.runners["auto"]?.efforts, ["medium", "high"]);
+    assert.equal(parsed.worker?.runners["claude-flag"]?.effort, undefined);
+  });
+
+  it("refuses an effort a task could turn into another flag, or that the command cannot use", () => {
+    const bad = (body: string, pattern: RegExp) =>
+      assert.throws(() => parseLocalPolicy(`worker:\n  runners:\n${body}`, "p.yaml"), pattern);
+    // A leading `-` would make the value an argument of its own.
+    bad(
+      "    a:\n      argv: [claude, -p]\n      effort: '--danger'\n",
+      /a\.effort must be an effort/,
+    );
+    bad(
+      "    a:\n      argv: [claude, -p]\n      effort: 'two words'\n",
+      /a\.effort must be an effort/,
+    );
+    bad("    a:\n      argv: [claude, -p]\n      effort: ''\n", /a\.effort must be an effort/);
+    bad("    a:\n      argv: [claude, -p]\n      effort: 5\n", /a\.effort must be an effort/);
+    bad(
+      "    a:\n      argv: [claude, -p]\n      efforts: [low, '--danger']\n",
+      /a\.efforts contains an invalid level/,
+    );
+    bad("    a:\n      argv: [claude, -p]\n      efforts: low\n", /a\.efforts must be a list/);
+    // Only claude has an effort flag oguri knows. Accepting the key for codex
+    // would silently add nothing.
+    bad("    a:\n      argv: [codex, exec, '-']\n      effort: high\n", /needs a claude argv/);
+    bad("    a:\n      argv: [my-agent, run]\n      effort: high\n", /needs a claude argv/);
+    bad("    a:\n      argv: [codex, exec, '-']\n      efforts: [low]\n", /needs a claude argv/);
+  });
+
+  it("accepts 20 concurrent runs, and refuses more or fewer than one", () => {
+    // The ceiling is one number for worker.concurrency and
+    // superagent.small.maxWorkers, so the effective value never depends on
+    // which section a person edited.
+    assert.equal(MAX_RUN_CONCURRENCY, 20);
+    assert.equal(
+      parseLocalPolicy("worker:\n  concurrency: 20\n", "p.yaml").worker?.concurrency,
+      20,
+    );
+    assert.throws(
+      () => parseLocalPolicy("worker:\n  concurrency: 21\n", "p.yaml"),
+      /concurrency must be an integer from 1 to 20/,
+    );
+    assert.equal(
+      parseLocalPolicy("superagent:\n  small:\n    maxWorkers: 20\n", "p.yaml").superagent?.small
+        .maxWorkers,
+      20,
+    );
+    assert.throws(
+      () => parseLocalPolicy("superagent:\n  small:\n    maxWorkers: 21\n", "p.yaml"),
+      /maxWorkers must be an integer from 1 to 20/,
+    );
+    // 20 is a ceiling, not a default: both default to the same small numbers.
+    assert.equal(DEFAULT_LOCAL_POLICY.worker.concurrency, 1);
+    assert.equal(DEFAULT_LOCAL_POLICY.worker.maxPerHour, 6);
+  });
+
+  it("reports the concurrency the engine really applies", () => {
+    const base = parseLocalPolicy("worker:\n  concurrency: 6\n", "p.yaml").worker;
+    assert.ok(base !== undefined);
+    const off = {
+      worker: base,
+      superagent: DEFAULT_LOCAL_POLICY.superagent,
+    };
+    assert.equal(effectiveConcurrency(off), 6, "no small superagent: worker.concurrency");
+    const on = {
+      worker: base,
+      superagent: {
+        ...DEFAULT_LOCAL_POLICY.superagent,
+        small: {
+          ...DEFAULT_LOCAL_POLICY.superagent.small,
+          enabled: true,
+          maxWorkers: 20,
+        },
+      },
+    };
+    assert.equal(effectiveConcurrency(on), 20, "the small superagent replaces it");
   });
 
   it("refuses a runner mapping it does not fully understand", () => {
@@ -341,6 +492,19 @@ describe("policy file", () => {
     assert.throws(
       () => parseLocalPolicy("worker:\n  followupDays: -1\n", "p.yaml"),
       /worker.followupDays must be an integer from 0 to 365/,
+    );
+  });
+
+  it("reads worker.maxTaskDepth, default 2, 0 to 8 (ADR 0036)", () => {
+    assert.equal(DEFAULT_LOCAL_POLICY.worker.maxTaskDepth, 2);
+    assert.equal(parseLocalPolicy(policyTemplate(), "template").worker?.maxTaskDepth, 2);
+    assert.equal(
+      parseLocalPolicy("worker:\n  maxTaskDepth: 0\n", "p.yaml").worker?.maxTaskDepth,
+      0,
+    );
+    assert.throws(
+      () => parseLocalPolicy("worker:\n  maxTaskDepth: 9\n", "p.yaml"),
+      /worker.maxTaskDepth must be an integer from 0 to 8/,
     );
   });
 

@@ -13,14 +13,23 @@ import { createHash } from "node:crypto";
 import {
   createPlanTasks,
   describeError,
+  renderTaskHeader,
+  type RunnerGate,
   type SuperagentPolicy,
   type TaskDetail,
+  type TaskStatus,
   type WorkerPolicy,
 } from "@oguri/core";
 import type { Backend } from "@oguri/daemon";
 import type { Message, TaskMandate } from "@oguri/protocol";
 
-import { parseRouteDecision, RouteError, type RouteDecision, type RouteKind } from "./decision.ts";
+import {
+  parseRouteDecision,
+  RouteError,
+  type RouteDecision,
+  type RouteKind,
+  type RouteTier,
+} from "./decision.ts";
 import { OneShotMind, type Mind } from "./mind.ts";
 import { askModel, resolveThinker, type AskModel } from "./model.ts";
 import {
@@ -31,7 +40,13 @@ import {
   type RouteRequest,
   type SuperagentRole,
 } from "./prompt.ts";
-import { loadSnapshot, scopeOf, type Snapshot, type SnapshotOptions } from "./snapshot.ts";
+import {
+  loadSnapshot,
+  scopeOf,
+  tierScope,
+  type Snapshot,
+  type SnapshotOptions,
+} from "./snapshot.ts";
 import { langOf, words } from "./words.ts";
 
 /** What every plan step's worker is told after its step. */
@@ -50,12 +65,18 @@ export const TO_SMALL_TAG = "to-small";
 /** Tag on a small superagent's report about one of its workers. */
 export const SMALL_REPORT_TAG = "superagent-small";
 
+/** Tag on a request that a person authorize a runner (`request_runner`). */
+export const RUNNER_REQUEST_TAG = "runner-request";
+
 export const BIG_KINDS: readonly RouteKind[] = [
   "read",
   "accept",
   "plan",
   "attach",
   "retarget",
+  "relink",
+  "replace",
+  "request_runner",
   "answer",
   "clarify",
   "stop",
@@ -75,6 +96,9 @@ export const SMALL_KINDS: readonly RouteKind[] = [
 export const COORDINATOR_KINDS: readonly RouteKind[] = [
   "read",
   "retarget",
+  "relink",
+  "replace",
+  "request_runner",
   "stop",
   "answer",
   "ignore",
@@ -115,6 +139,8 @@ export interface DecideOptions {
   mind?: Mind;
   /** What happened since the last turn, already told to the owner. */
   notices?: readonly string[];
+  /** Which runners a worker may be deployed on beyond the allow-list (ADR 0034). */
+  gate?: RunnerGate;
   signal?: AbortSignal;
 }
 
@@ -134,11 +160,16 @@ export async function decide(request: RouteRequest, options: DecideOptions): Pro
     ...(options.related === undefined ? {} : { related: options.related }),
     ...(options.only === undefined ? {} : { only: options.only }),
   });
+  // Only a role that deploys workers chooses their runners (ADR 0034).
+  const deploys = options.kinds.includes("accept") || options.kinds.includes("plan");
+  const choices = deploys ? tierScope(options.worker, options.gate) : undefined;
+  if (choices !== undefined) snapshot.choices = choices;
   const scope = scopeOf(snapshot, {
     kinds: options.kinds,
     mayAnswer: options.kinds.includes("answer"),
     maxSteps: MAX_ROUTE_STEPS,
     ...(options.defaultTarget === undefined ? {} : { defaultTarget: options.defaultTarget }),
+    ...(choices === undefined ? {} : { tiers: choices }),
   });
   try {
     const runner = resolveThinker(options.worker, options.runner);
@@ -258,13 +289,32 @@ export function superagentMandate(policy: SuperagentPolicy): TaskMandate {
   };
 }
 
-/** A worker's task text: the owner's words verbatim, then any routing note. */
-export function taskDefinition(text: string, note?: string): string {
+/**
+ * A worker's task text: the runner header when the decision chose one, then
+ * the owner's words verbatim, then any routing note.
+ *
+ * The header is written by code from a checked choice, never by the model: a
+ * tier, runner, and effort the decision was allowed to name, and the reason in
+ * one line. The owner's own text starts after a blank line, so nothing in it
+ * can be read as another header line.
+ */
+export function taskDefinition(text: string, note?: string, choice?: RouteTier): string {
   const routed =
     note === undefined || note.trim() === ""
       ? ""
       : `\n\nRouting note from the superagent: ${note.trim()}`;
-  return `${text.trim()}${routed}`;
+  return `${headerOf(choice)}${text.trim()}${routed}`;
+}
+
+/** The header lines for a checked choice, or nothing when there is none. */
+export function headerOf(choice: RouteTier | undefined): string {
+  if (choice === undefined) return "";
+  return renderTaskHeader({
+    ...(choice.runner === undefined ? {} : { runner: choice.runner }),
+    ...(choice.effort === undefined ? {} : { effort: choice.effort }),
+    ...(choice.tier === undefined ? {} : { tier: choice.tier }),
+    ...(choice.reason === "" ? {} : { reason: choice.reason }),
+  });
 }
 
 export interface ActContext {
@@ -273,7 +323,21 @@ export interface ActContext {
   policy: SuperagentPolicy;
   /** Where a worker goes when the decision names no machine. */
   defaultTarget?: string;
+  /**
+   * Claims a worker on a tier gets, so a failed run is released for another
+   * try and may move up a tier (ADR 0034). See `escalationAttempts`.
+   */
+  maxAttempts?: number;
   log: (line: string) => void;
+}
+
+/**
+ * How many tries a tiered worker gets: one, plus one for every tier it may
+ * climb under this machine's `worker.escalation`. Without escalation there is
+ * no limit to set, and a failed run blocks as before.
+ */
+export function escalationAttempts(worker: Pick<WorkerPolicy, "escalation">): number | undefined {
+  return worker.escalation.maxSteps > 0 ? worker.escalation.maxSteps + 1 : undefined;
 }
 
 /** What acting did. `deployed` lists the tasks whose workers were deployed. */
@@ -317,10 +381,14 @@ export async function act(
         room: decision.room,
         input: {
           title: decision.title,
-          definition: taskDefinition(conversation.text, decision.note),
+          definition: taskDefinition(conversation.text, decision.note, decision.choice),
           mandate,
           ...(target === undefined ? {} : { target }),
           ...(decision.requires.length === 0 ? {} : { requires: decision.requires }),
+          // Only a worker on a tier climbs; a pinned runner keeps the default rules.
+          ...(context.maxAttempts === undefined || decision.choice?.tier === undefined
+            ? {}
+            : { maxAttempts: context.maxAttempts }),
         },
       });
       const taskId = created.header.task?.id ?? created.header.id;
@@ -348,9 +416,12 @@ export async function act(
             title: step.title,
             // One step of a plan: the step alone. The owner's whole request, with
             // every other step in it, would invite the worker to do those too.
-            body: `${step.body.trim()}\n\n${PLAN_STEP_NOTE}`,
+            body: `${headerOf(step.choice)}${step.body.trim()}\n\n${PLAN_STEP_NOTE}`,
             dependsOn: step.dependsOn,
             requires: step.requires,
+            ...(context.maxAttempts === undefined || step.choice?.tier === undefined
+              ? {}
+              : { maxAttempts: context.maxAttempts }),
             ...((step.target ?? context.defaultTarget) === undefined
               ? {}
               : { target: (step.target ?? context.defaultTarget) as string }),
@@ -417,6 +488,101 @@ export async function act(
       });
       return { reply: say.stopped(detail.task.title), deployed: [] };
     }
+    case "relink": {
+      const { room, detail } = await findTask(backend, rooms, decision.taskId);
+      await backend.call("taskUpdate", {
+        room,
+        taskId: decision.taskId,
+        input: {
+          action: "relinked",
+          body: `Dependencies changed by the superagent: ${decision.reason}`,
+          ...(decision.addDependsOn.length === 0 ? {} : { addDependsOn: decision.addDependsOn }),
+          ...(decision.removeDependsOn.length === 0
+            ? {}
+            : { removeDependsOn: decision.removeDependsOn }),
+        },
+      });
+      return { reply: say.relinked(detail.task.title), deployed: [] };
+    }
+    case "replace": {
+      const { room, detail } = await findTask(backend, rooms, decision.taskId);
+      const target = decision.target ?? context.defaultTarget;
+      const created = await backend.call<Message>("taskCreate", {
+        room,
+        input: {
+          title: decision.title,
+          definition: taskDefinition(detail.definition, decision.note),
+          mandate,
+          ...(target === undefined ? {} : { target }),
+          ...(decision.requires.length === 0 ? {} : { requires: decision.requires }),
+          ...(detail.task.dependsOn === undefined ? {} : { dependsOn: detail.task.dependsOn }),
+        },
+      });
+      const replacementId = created.header.task?.id ?? created.header.id;
+      // Everything still waiting on the cancelled task moves onto its replacement.
+      const waiting = (await backend.call<TaskStatus[]>("tasks", { room })).filter(
+        (status) =>
+          status.task.state === "open" && (status.task.dependsOn ?? []).includes(decision.taskId),
+      );
+      const moved: string[] = [];
+      const failed: string[] = [];
+      for (const status of waiting) {
+        try {
+          await backend.call("taskUpdate", {
+            room,
+            taskId: status.task.id,
+            input: {
+              action: "relinked",
+              addDependsOn: [replacementId],
+              removeDependsOn: [decision.taskId],
+              body: `Moved onto the replacement ${replacementId} for cancelled ${decision.taskId}: ${decision.reason}`,
+            },
+          });
+          moved.push(status.task.title);
+        } catch (error) {
+          failed.push(`${status.task.title}: ${describeError(error)}`);
+          context.log(
+            `could not move ${status.task.id} onto ${replacementId}: ${describeError(error)}`,
+          );
+        }
+      }
+      return {
+        reply: `${say.replaced(detail.task.title, replacementId, moved.length)}${
+          failed.length === 0 ? "" : `\n${say.replaceFailed(failed.join("; "))}`
+        }`,
+        deployed: [{ room, taskId: replacementId }],
+      };
+    }
+    case "request_runner": {
+      const subject = [
+        `Runner '${decision.runner}' needs a person's authorization`,
+        decision.machine === undefined ? "" : ` on ${decision.machine}`,
+        decision.taskId === undefined ? "" : ` for task ${decision.taskId}`,
+        `. Why: ${decision.reason}`,
+        `\nAdd it to worker.runners in that machine's policy.yaml if it is not there, and when runner grants are on, grant it at that machine's terminal with: oguri runner grant ${decision.runner} (or reply here to decline). Nothing runs on it until you do.`,
+      ].join("");
+      const input = {
+        body: subject,
+        kind: "question",
+        needs: "human",
+        tags: [FROM_SUPERAGENT_TAG, RUNNER_REQUEST_TAG],
+        ...(conversation.author === context.agentId ? {} : { mentions: [conversation.author] }),
+      };
+      try {
+        await backend.call("send", {
+          room: conversation.room,
+          input:
+            conversation.thread === ""
+              ? input
+              : { ...input, thread: conversation.thread, inReplyTo: conversation.messageId },
+        });
+      } catch (error) {
+        if ((error as { code?: string }).code !== "REPLY_BUDGET_EXCEEDED") throw error;
+        await backend.call("send", { room: conversation.room, input });
+      }
+      // The request is the message to the owner; no second reply repeats it.
+      return { reply: "", deployed: [] };
+    }
     case "answer":
       return { reply: decision.text, deployed: [] };
     case "clarify":
@@ -442,9 +608,14 @@ export async function reply(
     ...(conversation.author === self ? {} : { mentions: [conversation.author] }),
   };
   try {
+    // An empty thread is a message to the owner with no conversation behind it,
+    // such as a task stuck behind a cancelled dependency that Big did not deploy.
     await backend.call("send", {
       room: conversation.room,
-      input: { ...input, thread: conversation.thread, inReplyTo: conversation.messageId },
+      input:
+        conversation.thread === ""
+          ? input
+          : { ...input, thread: conversation.thread, inReplyTo: conversation.messageId },
     });
   } catch (error) {
     // A long conversation can reach the room's reply budget; start a new thread rather than drop it.

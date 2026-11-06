@@ -9,6 +9,7 @@
  */
 
 import {
+  effectiveConcurrency,
   loadLocalPolicy,
   type LocalPolicy,
   type MachineRow,
@@ -50,19 +51,26 @@ function stamp(line: string): void {
 
 /**
  * The worker policy as the small superagent runs it. It decides how many
- * workers run here at once (`superagent.small.maxWorkers`), and the big
- * superagent's workers need no `oguri task approve` here, as if it were in
- * `trustedRequesters`.
+ * workers run here at once, and the big superagent's workers need no
+ * `oguri task approve` here, as if it were in `trustedRequesters`.
+ *
+ * The concurrency number comes from `effectiveConcurrency`, the same function
+ * `oguri worker status` reads, so what a machine reports and what it runs are
+ * the same number.
  */
 export function workerPolicyFor(policy: LocalPolicy): WorkerPolicy {
   const small = policy.superagent.small;
-  if (!small.enabled) return policy.worker;
+  if (!small.enabled) return { ...policy.worker, concurrency: effectiveConcurrency(policy) };
   return {
     ...policy.worker,
     // The small superagent decides how many workers run here at once.
-    concurrency: small.maxWorkers,
+    concurrency: effectiveConcurrency(policy),
     // The hourly cap must not undercut what it may run at once.
-    maxPerHour: Math.max(policy.worker.maxPerHour, small.maxWorkers),
+    maxPerHour: Math.max(
+      policy.worker.maxPerHour,
+      policy.superagent.small.maxWorkers,
+      policy.worker.concurrency,
+    ),
     ...(small.big === undefined
       ? {}
       : { trustedRequesters: [...new Set([...policy.worker.trustedRequesters, small.big])] }),
@@ -322,8 +330,16 @@ async function superagentStatus(ctx: Ctx): Promise<number> {
   const bigState = await readSuperagentState(ctx.layout.root, "big", Date.now());
   const runs = (await listRuns(ctx.layout.root, 50)).filter((run) => run.outcome === "running");
   const today = await todayUsage(ctx.layout.root);
+  // The number the worker engine actually applies, not the section that set it.
+  const concurrency = effectiveConcurrency(policy);
   if (bool(ctx, "json")) {
-    json({ superagent: policy.superagent, tracked: bigState.tracked, running: runs, today });
+    json({
+      superagent: policy.superagent,
+      concurrency,
+      tracked: bigState.tracked,
+      running: runs,
+      today,
+    });
     return 0;
   }
   out(bold("superagent"));
@@ -334,6 +350,9 @@ async function superagentStatus(ctx: Ctx): Promise<number> {
   out(
     `  small       ${small.enabled ? green("on") : dim("off")}${small.big === undefined ? "" : `  · trusts ${small.big}`}${small.enabled && !policy.worker.enabled ? yellow("  · worker.enabled is false: no hands") : ""}`,
   );
+  out(
+    `  concurrency ${String(concurrency)} at once${small.enabled ? dim(` (superagent.small.maxWorkers)`) : dim(` (worker.concurrency)`)}`,
+  );
   if (big.enabled) {
     const tracked = Object.entries(bigState.tracked);
     out(`  deployed    ${String(tracked.length)} worker(s) followed`);
@@ -341,10 +360,16 @@ async function superagentStatus(ctx: Ctx): Promise<number> {
   }
   out(`  running     ${String(runs.length)} worker(s) on this machine`);
   for (const run of runs) out(dim(`    ${run.taskId} ${run.title} (${run.runner})`));
-  // Runs are local and priced only when the runner prints a price; with none
-  // read, the count still answers "did it do anything today".
-  const cost = today.costUsd === null ? "" : ` · $${today.costUsd.toFixed(2)}`;
+  // The figure is a known subtotal, never a total: runners that print no price
+  // and runs still in flight are outside it, so the count is said alongside.
+  const cost =
+    today.costUsd === null
+      ? ""
+      : today.unpricedRuns === 0
+        ? ` · $${today.costUsd.toFixed(2)} total`
+        : ` · $${today.costUsd.toFixed(2)} known subtotal · ${String(today.unpricedRuns)} run(s) unpriced`;
   out(`  today       ${String(today.runs)} worker run(s)${cost}`);
+  out("  cost scope  worker runs only; excludes Big/Small superagent brain sessions");
   out("");
   out(dim('talk to them:  oguri big "<message>"   ·   oguri small <agent|machine:id> "<message>"'));
   return 0;

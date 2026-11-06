@@ -118,7 +118,7 @@ before(async () => {
   await writeFile(join(tmp, "brain.cjs"), BRAIN);
   const remote = join(tmp, "transport.git");
   await exec("git", ["init", "--bare", "--quiet", "--initial-branch=main", remote]);
-  await oguri("init", "--repo", remote, "--network", "home", "--agent", "liu-claude");
+  await oguri("init", "--repo", remote, "--network", "home", "--agent", "alice-claude");
   const node = JSON.stringify(process.execPath);
   const worker = JSON.stringify(join(tmp, "worker.cjs"));
   await writeFile(

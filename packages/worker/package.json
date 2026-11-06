@@ -1,6 +1,6 @@
 {
   "name": "@oguri/worker",
-  "version": "1.0.1",
+  "version": "1.0.5",
   "description": "oguri worker: claims tasks addressed to this agent or machine, runs an allow-listed command, and reports the result.",
   "license": "MIT",
   "type": "module",

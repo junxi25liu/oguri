@@ -2,6 +2,7 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import * as z from "zod";
 
 import type { Backend } from "@oguri/daemon";
+import { Layout, RunnerGrantStore } from "@oguri/core";
 import {
   MAX_TASK_ATTEMPTS,
   MAX_TASK_DEPENDENCIES,
@@ -10,11 +11,14 @@ import {
   TASK_UPDATE_ACTIONS,
 } from "@oguri/protocol";
 import { bigReplies, bigRoom, bigSend } from "./big-tools.ts";
+import { runnerList, runnerRequest } from "./runner-tools.ts";
 import { taskAck, taskAnswer, taskHandback } from "./task-relay-tools.ts";
-import { taskAsk, taskPlanCreate, taskProgress } from "./task-run-tools.ts";
+import { inWorkerRun, taskAsk, taskPlanCreate, taskProgress } from "./task-run-tools.ts";
+
+export { inWorkerRun } from "./task-run-tools.ts";
 
 export const MCP_SERVER_NAME = "oguri";
-export const MCP_SERVER_VERSION = "1.0.1";
+export const MCP_SERVER_VERSION = "1.0.5";
 
 export interface McpProjectContext {
   network: string;
@@ -113,17 +117,6 @@ const TASK_CAPABILITY = z
 const GIT_OBJECT_ID = z
   .string()
   .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i, "expected a full git object id");
-
-/**
- * True when this server was started for a worker's run: oguri's worker hands
- * every run its task in the environment. A run may be steered by text it
- * reads, so it never gets the tools that start more work on the owner's
- * behalf.
- */
-export function inWorkerRun(env: NodeJS.ProcessEnv = process.env): boolean {
-  const task = env["OGURI_TASK_ID"];
-  return task !== undefined && task !== "";
-}
 
 export function createMcpServer(
   backend: Backend,
@@ -596,7 +589,7 @@ export function createMcpServer(
       description:
         "Shared work as an append-only thread. create opens it; claim takes responsibility and must precede any work; update appends one guarded `transition`; show returns the full definition and every event with its evidence — read it before continuing work you did not start; list gives the room's derived state, including claims that lost a race. " +
         "Tasks form a graph: dependsOn tasks must complete before a claim is accepted, parent makes a subtask, requires limits claims to agents declaring those capabilities, maxAttempts bounds claims. Each status carries `ready`, `waitingOn`, and `children`; claim only a task whose `ready` is true. " +
-        "In a worker run: progress updates your own task, ask puts a question about it to a peer (needsHuman: a person), plan creates subtasks from a plan you wrote. " +
+        "In a worker run, writes reach only your task and its subtasks: progress updates it, ask puts a question about it to a peer (needsHuman: a person), plan splits it into subtasks. " +
         "handback returns out-of-scope work (to the chat, or the superagent). Chat-origin: ack confirms once, answer replies (inReplyTo, default newest). " +
         "Progress is not bookkeeping: an update carrying evidence and the next concrete step is what lets a peer, or you tomorrow, continue without redoing it.",
       inputSchema: z.object({
@@ -694,7 +687,8 @@ export function createMcpServer(
     },
     async (args) => {
       const { action, taskId } = args;
-      const room = args.room as string;
+      // A run's writes stay in its own room (ADR 0036), so it need not name it.
+      const room = (args.room ?? (inWorkerRun(env) ? env["OGURI_TASK_ROOM"] : undefined)) as string;
       const need = (value: unknown, field: string): void => {
         if (value === undefined)
           throw new Error(`oguri_task: action=${action} requires \`${field}\``);
@@ -706,7 +700,7 @@ export function createMcpServer(
         action !== "answer" &&
         action !== "handback"
       ) {
-        need(args.room, "room");
+        need(room, "room");
       }
       if (action === "ack" || action === "answer" || action === "handback") {
         need(args.body, "body");
@@ -735,14 +729,18 @@ export function createMcpServer(
       }
       if (action === "ask") {
         need(args.question, "question");
-        return await taskAsk(backend, {
-          question: args.question as string,
-          mentions: args.mentions,
-          needsHuman: args.needsHuman,
-          waitSec: args.waitSec,
-          room: args.room,
-          taskId,
-        });
+        return await taskAsk(
+          backend,
+          {
+            question: args.question as string,
+            mentions: args.mentions,
+            needsHuman: args.needsHuman,
+            waitSec: args.waitSec,
+            room: args.room,
+            taskId,
+          },
+          env,
+        );
       }
       if (action !== "create" && action !== "list") need(taskId, "taskId");
 
@@ -1011,6 +1009,50 @@ export function createMcpServer(
           },
         }),
       ),
+  );
+
+  // Runner grants: read them, or ask for one. Granting is the person's, at
+  // this machine's terminal (`oguri runner grant`), and is not a tool here.
+  server.registerTool(
+    "oguri_runner",
+    {
+      title: "See which runners may run here, or ask for one",
+      description:
+        "list: each runner in this machine's worker.runners, whether a grant lets it run, and open requests. " +
+        "request: ask this machine's person for a runner, saying why; it grants nothing. Then keep working on what does not need it. Only `oguri runner grant`, by a person at the terminal, grants.",
+      inputSchema: z.object({
+        action: z.enum(["list", "request"]),
+        runner: z
+          .string()
+          .regex(/^[a-z][a-z0-9-]{0,31}$/, "expected a runner name")
+          .optional()
+          .describe("request"),
+        reason: z.string().min(1).max(1000).optional().describe("request: why it is needed"),
+        taskId: TASK_ID.optional().describe("request: defaults to this run's task"),
+        room: ROOM.optional().describe("request"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ action, runner, reason, taskId, room }) => {
+      const store = RunnerGrantStore.forHome(new Layout(env["OGURI_HOME"]).root);
+      if (action === "list") return text(await runnerList(backend, store));
+      if (runner === undefined || reason === undefined) {
+        throw new Error("oguri_runner: action=request requires `runner` and `reason`");
+      }
+      return text(
+        await runnerRequest(
+          backend,
+          store,
+          {
+            runner,
+            reason,
+            ...(taskId === undefined ? {} : { taskId }),
+            ...(room === undefined ? {} : { room }),
+          },
+          env,
+        ),
+      );
+    },
   );
 
   // Creating, joining, and leaving rooms are deliberately NOT tool calls.

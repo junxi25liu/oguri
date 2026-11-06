@@ -18,6 +18,7 @@ export const TASK_ACTIONS = [
   "created",
   "refined",
   "retargeted",
+  "relinked",
   "claimed",
   "started",
   "progressed",
@@ -33,6 +34,7 @@ export type TaskAction = (typeof TASK_ACTIONS)[number];
 export const TASK_UPDATE_ACTIONS = [
   "refined",
   "retargeted",
+  "relinked",
   "started",
   "progressed",
   "blocked",
@@ -87,7 +89,9 @@ export interface Task {
   staleAfterSeconds: number;
   /**
    * Tasks in the same room that must be `completed` before this one may be
-   * claimed. Fixed at creation. Absent means no dependencies.
+   * claimed. Fixed at creation; afterwards only a `relinked` event by the
+   * creator, on a task that is still open and unclaimed, may change it.
+   * Absent means no dependencies.
    */
   dependsOn?: string[];
   /** The task in the same room this one is a subtask of. Fixed at creation. */
@@ -192,6 +196,7 @@ export const TASK_TRANSITION_CODES = [
   "DEPENDENCY_PENDING",
   "ATTEMPTS_EXHAUSTED",
   "CAPABILITY_MISSING",
+  "DEPENDENCY_CYCLE",
 ] as const;
 export type TaskTransitionCode = (typeof TASK_TRANSITION_CODES)[number];
 
@@ -375,6 +380,7 @@ function assertResultShape(task: Task, source?: string): void {
   const expectedStates: Partial<Record<TaskAction, readonly TaskState[]>> = {
     created: ["open"],
     retargeted: ["open"],
+    relinked: ["open"],
     claimed: ["claimed"],
     started: ["in_progress"],
     progressed: ["in_progress"],
@@ -776,19 +782,21 @@ function sameList(
 }
 
 /**
- * Everything fixed at creation.
+ * Everything fixed at creation, except the dependencies of an open task.
  *
  * The graph fields are here so a refinement cannot quietly drop a dependency
  * or a requirement. It also means a client too old to know them, which writes
  * a snapshot without them, has its events rejected rather than accepted with
- * the constraint gone.
+ * the constraint gone. A `relinked` event is the one way dependencies change;
+ * `assertTaskTransition` gates who may write it and when, so every other
+ * action still has to repeat them unchanged.
  */
 function sameIdentity(previous: Task, next: Task): boolean {
   return (
     previous.id === next.id &&
     previous.creator === next.creator &&
     previous.staleAfterSeconds === next.staleAfterSeconds &&
-    sameList(previous.dependsOn, next.dependsOn) &&
+    (next.action === "relinked" || sameList(previous.dependsOn, next.dependsOn)) &&
     previous.parent === next.parent &&
     sameList(previous.requires, next.requires) &&
     previous.maxAttempts === next.maxAttempts &&
@@ -815,6 +823,51 @@ export function nextTaskAttempt(previous: Task, next: Task): number {
 /** Whether a task still has a claim left under `maxAttempts`. */
 export function hasTaskAttemptsLeft(task: Task): boolean {
   return task.maxAttempts === undefined || (task.attempt ?? 0) < task.maxAttempts;
+}
+
+/**
+ * The path by which `taskId` would end up waiting on itself if it depended on
+ * `dependsOn`, or undefined when it would not.
+ *
+ * `dependsOf` answers for the same point in the room's canonical order as the
+ * relinking event, like `assertDependenciesMet`, so every machine agrees.
+ */
+export function findDependencyCycle(
+  taskId: string,
+  dependsOn: readonly string[],
+  dependsOf: (id: string) => readonly string[] | undefined,
+): string[] | undefined {
+  const seen = new Set<string>();
+  const walk = (id: string, path: string[]): string[] | undefined => {
+    if (id === taskId) return [...path, id];
+    if (seen.has(id)) return undefined;
+    seen.add(id);
+    for (const next of dependsOf(id) ?? []) {
+      const found = walk(next, [...path, id]);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  };
+  for (const id of dependsOn) {
+    const found = walk(id, [taskId]);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+/** Refuse a dependency list that would make a task wait on itself, directly or through others. */
+export function assertNoDependencyCycle(
+  taskId: string,
+  dependsOn: readonly string[],
+  dependsOf: (id: string) => readonly string[] | undefined,
+): void {
+  const cycle = findDependencyCycle(taskId, dependsOn, dependsOf);
+  if (cycle !== undefined) {
+    throw new TaskTransitionError(
+      `dependencies would form a cycle: ${cycle.join(" → ")}`,
+      "DEPENDENCY_CYCLE",
+    );
+  }
 }
 
 /**
@@ -855,7 +908,7 @@ export function assertDependenciesMet(
 export function assertTaskTransition(previous: Task, next: Task, author: string): void {
   assertUnchanged(
     sameIdentity(previous, next),
-    "task id, creator, stale threshold, dependencies, parent, requirements, attempt limit, origin, and mandate are immutable",
+    "task id, creator, stale threshold, parent, requirements, attempt limit, origin, and mandate are immutable, and dependencies change only through a 'relinked' event",
   );
   if (next.action !== "refined") {
     assertUnchanged(previous.title === next.title, "only a refinement may change the task title");
@@ -892,6 +945,22 @@ export function assertTaskTransition(previous: Task, next: Task, author: string)
         "a claimed task must be released before retargeting",
       );
       assertUnchanged(previous.target !== next.target, "retargeting must change the target");
+      return;
+    case "relinked":
+      assertUnchanged(author === previous.creator, "only the task creator may change dependencies");
+      assertUnchanged(
+        previous.state === "open" && next.state === "open",
+        "dependencies can be changed only while the task is open; a started task has already passed its dependency gate",
+      );
+      assertUnchanged(
+        previous.assignee === undefined && next.assignee === undefined,
+        "a claimed task must be released before its dependencies change",
+      );
+      assertUnchanged(sameAssignment(previous, next), "relinking cannot change assignment");
+      assertUnchanged(
+        !sameList(previous.dependsOn, next.dependsOn),
+        "relinking must change the dependencies",
+      );
       return;
     case "claimed":
       assertUnchanged(

@@ -4,6 +4,10 @@
  * Everything goes through `ReadOnlyBackend`, so this module cannot write even
  * by mistake. Each part of the dashboard is read independently: one failing
  * read is reported in `errors` and the rest of the page still renders.
+ *
+ * `readDashboard` is the page's ONE request. It still answers every key the
+ * original dashboard did, and folds the same reads into an execution-centre
+ * view (`execution.ts`) without adding a backend method or a server route.
  */
 
 import type { Agenda, InboxItem, MachineRow, PresenceRow, TaskStatus } from "@oguri/core";
@@ -11,11 +15,17 @@ import type { Backend } from "@oguri/daemon";
 import type { Message } from "@oguri/protocol";
 import type { RunRecord } from "@oguri/worker";
 
+import {
+  buildExecutionCenter,
+  type ExecutionInput,
+  type LocalPolicyFacts,
+  type LocalUsageFacts,
+} from "./execution.ts";
 import { needsYou, sortNeedsYou, type NeedsYouItem } from "./needs-you.ts";
 
 /** Messages shown per room, and how much of each body. */
-const MESSAGES_PER_ROOM = 20;
-const EXCERPT_CHARS = 500;
+const MESSAGES_PER_ROOM = 80;
+export const EXCERPT_CHARS = 500;
 /**
  * Every backend method the dashboard may call. Each one only reads.
  *
@@ -65,7 +75,8 @@ export function redactRemote(remote: string): string {
   }
 }
 
-function excerpt(text: string): string {
+/** Clip long bodies; the page collapses them again and offers a copy button. */
+export function excerpt(text: string): string {
   const flat = text.trim();
   return flat.length > EXCERPT_CHARS ? `${flat.slice(0, EXCERPT_CHARS - 1)}…` : flat;
 }
@@ -92,6 +103,19 @@ export interface TaskView {
   /** The chat the task was requested in (ADR 0030), shown as a badge. */
   source: string | null;
   requester: string | null;
+  /** The definition, clipped; the reading view folds the rest into a details pane. */
+  definition: string | null;
+  /** Which dependencies are still unfinished, with their states. */
+  waitingOn: { id: string; state: string }[];
+  /** Refused lifecycle events: the errors a person can actually act on. */
+  invalidEvents: { messageId: string; reason: string; code: string | null }[];
+  /** The most recent event, so a task row can locate its message/result. */
+  currentMessageId: string | null;
+  thread: string | null;
+  /** Capability requirements, used by the task filter. */
+  requires: string[];
+  /** Whether the task may be claimed now. */
+  ready: boolean;
 }
 
 function strings(value: unknown): string[] {
@@ -109,6 +133,8 @@ export function taskView(status: TaskStatus): TaskView {
   const task = status.task as TaskStatus["task"] & Record<string, unknown>;
   const loose = status as TaskStatus & Record<string, unknown>;
   const parent = task?.["parent"] ?? loose?.["parent"];
+  const stringOrNull = (value: unknown): string | null =>
+    typeof value === "string" ? value : null;
   return {
     id: task.id,
     title: task.title,
@@ -122,9 +148,25 @@ export function taskView(status: TaskStatus): TaskView {
     stale: status.stale,
     dependsOn: strings(task?.["dependsOn"] ?? loose?.["dependsOn"]),
     parent: typeof parent === "string" ? parent : null,
-    children: strings(task?.["children"] ?? loose?.["children"]),
+    children: [
+      ...new Set([
+        ...strings(task?.["children"] ?? loose?.["children"]),
+        ...(status.children ?? []).map((child) => child.id),
+      ]),
+    ],
     source: task.origin?.source ?? null,
     requester: task.origin?.requester ?? null,
+    definition: excerpt(status.definition ?? ""),
+    waitingOn: (status.waitingOn ?? []).map((link) => ({ id: link.id, state: link.state })),
+    invalidEvents: (status.invalidEvents ?? []).map((event) => ({
+      messageId: event.messageId,
+      reason: event.reason,
+      code: stringOrNull(event.code),
+    })),
+    currentMessageId: status.currentMessageId ?? null,
+    thread: status.thread ?? null,
+    requires: strings(task.requires),
+    ready: status.ready ?? false,
   };
 }
 
@@ -140,9 +182,14 @@ export interface MessageView {
   external: string | null;
   relay: string | null;
   excerpt: string;
+  /** Tags let the machines view distinguish a superagent report from a heartbeat. */
+  tags: string[];
+  refs: string[];
+  /** Where the result is, when the event published a link or a branch ref. */
+  link: string | null;
 }
 
-function messageView(message: Message): MessageView {
+export function messageView(message: Message): MessageView {
   const h = message.header;
   return {
     id: h.id,
@@ -158,6 +205,9 @@ function messageView(message: Message): MessageView {
         : `${h.external.source} · ${h.external.actorName ?? h.external.actor}`,
     relay: h.relay ?? null,
     excerpt: excerpt(message.body),
+    tags: [...(h.tags ?? [])],
+    refs: [...(h.refs ?? [])],
+    link: (h.refs ?? []).find((ref) => /^https?:\/\//.test(ref)) ?? null,
   };
 }
 
@@ -194,10 +244,18 @@ export interface DashboardSources {
   backend: ReadOnlyBackend;
   /** This machine's worker runs. Local files, never the network. */
   listRuns: (limit: number) => Promise<RunRecord[]>;
+  /** Optional machine-local reads. Absent on older callers; never a write. */
+  localPolicy?: () => Promise<LocalPolicyFacts | null>;
+  localUsage?: () => Promise<LocalUsageFacts | null>;
+  now?: () => number;
 }
 
 /** Read one thing; on failure, record why and carry on with the rest. */
-async function attempt<T>(errors: string[], what: string, fn: () => Promise<T>): Promise<T | null> {
+export async function attempt<T>(
+  errors: string[],
+  what: string,
+  fn: () => Promise<T>,
+): Promise<T | null> {
   try {
     return await fn();
   } catch (error) {
@@ -206,9 +264,11 @@ async function attempt<T>(errors: string[], what: string, fn: () => Promise<T>):
   }
 }
 
-export async function readStatus(sources: DashboardSources): Promise<StatusView> {
-  const status = await sources.backend.call<StatusView>("status");
-  return { ...status, remote: redactRemote(status.remote) };
+export function readStatus(sources: DashboardSources): Promise<StatusView> {
+  return sources.backend.call<StatusView>("status").then((status) => ({
+    ...status,
+    remote: redactRemote(status.remote),
+  }));
 }
 
 export interface RoomView {
@@ -236,44 +296,76 @@ export async function readRoom(sources: DashboardSources, room: string): Promise
   };
 }
 
-/** Everything the page shows, in one response, so one poll is one request. */
+/**
+ * Everything the page shows, in one response, so one poll is one request.
+ *
+ * The legacy keys (`status`, `machines`, `rooms`, `needsYou`, `needsHuman`,
+ * `runs`, `agenda`, `errors`) are preserved verbatim, so no existing endpoint
+ * or read-only regression test changes. The new keys are a pure fold in
+ * `execution.ts` over exactly the same reads.
+ */
 export async function readDashboard(sources: DashboardSources): Promise<Record<string, unknown>> {
+  const now = sources.now?.() ?? Date.now();
   const errors: string[] = [];
   const status = await attempt(errors, "status", () => readStatus(sources));
-  const [machines, presence, agenda, human, runs] = await Promise.all([
+  const [machines, presence, agenda, human, runs, policy, usage] = await Promise.all([
     attempt(errors, "machines", () => sources.backend.call<MachineRow[]>("machines")),
     attempt(errors, "presence", () => sources.backend.call<PresenceRow[]>("presence")),
-    attempt(errors, "agenda", () => sources.backend.call<Agenda>("agenda", { limit: 50 })),
+    attempt(errors, "agenda", () => sources.backend.call<Agenda>("agenda", { limit: 100 })),
     attempt(errors, "inbox", () => sources.backend.call<InboxItem[]>("inbox", { needs: "human" })),
-    attempt(errors, "worker runs", () => sources.listRuns(20)),
+    attempt(errors, "worker runs", () => sources.listRuns(50)),
+    attempt(errors, "local policy", async () =>
+      sources.localPolicy === undefined ? null : await sources.localPolicy(),
+    ),
+    attempt(errors, "local usage", async () =>
+      sources.localUsage === undefined ? null : await sources.localUsage(),
+    ),
   ]);
   const rooms = await Promise.all(
     (status?.subscriptions ?? []).map((room) => readRoom(sources, room)),
   );
-  return {
-    generatedAt: new Date().toISOString(),
+  const needsYouItems = sortNeedsYou(rooms.flatMap((room) => room.needsYou));
+  const needsHumanItems = (human ?? []).map(humanItem);
+  const agendaEntries =
+    agenda === null
+      ? []
+      : agenda.entries.map((entry) => ({
+          room: entry.room,
+          relation: entry.relation,
+          needsAttention: entry.needsAttention,
+          task: taskView(entry.status),
+        }));
+  const input: ExecutionInput = {
+    generatedAt: new Date(now).toISOString(),
     mode: sources.backend.mode,
-    agent: status?.agentId ?? null,
-    network: status?.networkId ?? null,
-    status,
+    now,
+    status: status === null ? null : (status as unknown as Record<string, unknown>),
     machines,
     presence,
-    agenda:
-      agenda === null
-        ? null
-        : {
-            counts: agenda.counts,
-            entries: agenda.entries.map((entry) => ({
-              room: entry.room,
-              relation: entry.relation,
-              needsAttention: entry.needsAttention,
-              task: taskView(entry.status),
-            })),
-          },
-    needsYou: sortNeedsYou(rooms.flatMap((room) => room.needsYou)),
-    needsHuman: (human ?? []).map(humanItem),
+    agenda: agenda === null ? null : { counts: agenda.counts },
     rooms,
-    runs,
+    runs: runs ?? [],
+    needsHuman: needsHumanItems,
+    agendaEntries,
+    ...(policy === null ? {} : { policy }),
+    ...(usage === null ? {} : { usage }),
     errors,
+    readMethods: READ_METHODS,
+  };
+  const execution = buildExecutionCenter(input);
+  return {
+    ...execution,
+    // `/api/dashboard` has always returned the raw machine rows here. Keep
+    // that shape; the richer fold is published under its own key.
+    machineViews: execution.machines,
+    needsYou: needsYouItems,
+    needsHuman: needsHumanItems,
+    agenda: agenda === null ? null : { counts: agenda.counts, entries: agendaEntries },
+    rooms,
+    runs: runs ?? [],
+    errors,
+    status,
+    machines,
+    presence: presence ?? [],
   };
 }

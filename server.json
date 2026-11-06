@@ -9,13 +9,13 @@
     "source": "github",
     "subfolder": "packages/cli"
   },
-  "version": "1.0.1",
+  "version": "1.0.5",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "oguri",
-      "version": "1.0.1",
+      "version": "1.0.5",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"

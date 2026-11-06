@@ -7,21 +7,30 @@
  * the secret scanner are the same for both.
  */
 
-import { describeError, type WorkerPolicy } from "@oguri/core";
+import { describeError, type RunnerGate, type WorkerPolicy } from "@oguri/core";
 import type { Backend } from "@oguri/daemon";
 
+import { escalateCandidate } from "./escalate.ts";
 import type { Followup } from "./followup.ts";
 import { planLaunch } from "./launch.ts";
 import { buildReport, fallbackReport } from "./outcome.ts";
 import { acknowledge, postInThread, relayAfterRun, tailWords } from "./relay.ts";
-import { readResult, resultPath, type ResultRead } from "./result.ts";
+import {
+  RESULT_REQUIRED_REASON,
+  readResult,
+  resultPath,
+  resultSummary,
+  type ResultRead,
+} from "./result.ts";
 import type { RetryBackoff } from "./retry.ts";
+import { holdReport } from "./report.ts";
 import { openChildCount } from "./rollup.ts";
 import type { Executor, RunResult } from "./runner.ts";
 import { addConsumed, readConsumed, runDir, writeRunRecord, type RunRecord } from "./runs.ts";
 import type { Candidate } from "./select.ts";
-import { readSession, sessionFile } from "./session.ts";
+import { readSession, runnerEffort, runnerModel, sessionFile } from "./session.ts";
 import { failureReason, formatDuration, summarise, succeeded } from "./summary.ts";
+import { parseRunOutput, readRunCost } from "./usage.ts";
 import {
   agentFlavor,
   liveText,
@@ -55,6 +64,8 @@ export interface RunHost {
   oguriMcp?: McpServer;
   /** How often a live session looks for a person's new messages. */
   liveIntervalMs?: number;
+  /** Which runners may be used here beyond the allow-list (ADR 0034). */
+  gate?: RunnerGate;
 }
 
 export interface RunJob {
@@ -74,7 +85,7 @@ export interface RunJob {
 function answerFor(read: ResultRead, result: RunResult): { summary: string; pr?: string } {
   if (read.kind === "valid") {
     return {
-      summary: read.result.summary,
+      summary: resultSummary(read.result),
       ...(read.result.pr === undefined ? {} : { pr: read.result.pr }),
     };
   }
@@ -144,9 +155,11 @@ export async function executeRun(host: RunHost, job: RunJob): Promise<void> {
 
   const plan = await planLaunch({
     candidate,
+    backend,
     ...(followup === undefined ? {} : { followup }),
     ranBefore: job.ranBefore,
     resultFile,
+    resultRequired: policy.runners[candidate.runner]?.requireResult === true,
     tools:
       host.oguriMcp !== undefined &&
       candidate.oguriTools !== false &&
@@ -173,6 +186,16 @@ export async function executeRun(host: RunHost, job: RunJob): Promise<void> {
     } catch (failure) {
       record.outcome = "unreported";
       record.note = describeError(failure);
+      record.pendingReport = holdReport(
+        {
+          action: "blocked",
+          body: `${reason}. Full log: ${where}`,
+          refs: [],
+          needsHuman: false,
+        },
+        host.now(),
+        failure,
+      );
     }
     await writeRunRecord(home, record);
     // Retrying every pass would fail the same way; the person can write again.
@@ -235,7 +258,9 @@ export async function executeRun(host: RunHost, job: RunJob): Promise<void> {
   const live = candidate.session === "claude-stream" && candidate.thread !== undefined;
   let send: ((text: string) => boolean) | undefined;
   const given = new Set<string>(followup?.messages.map((message) => message.id) ?? []);
-  const delivered: string[] = [];
+  /** Message ids by the stdin write that carried them; the prompt is write 1. */
+  const delivered: { write: number; ids: string[] }[] = [];
+  let writes = 1;
   let delivering = false;
   const deliver = async (): Promise<void> => {
     if (send === undefined || delivering || candidate.thread === undefined) return;
@@ -252,10 +277,13 @@ export async function executeRun(host: RunHost, job: RunJob): Promise<void> {
       });
       if (fresh.length === 0) return;
       if (!send(liveText(fresh, agentId))) return;
+      writes += 1;
+      const ids: string[] = [];
       for (const message of fresh) {
         given.add(message.header.id);
-        delivered.push(message.header.id);
+        ids.push(message.header.id);
       }
+      delivered.push({ write: writes, ids });
       host.log(
         `${candidate.taskId} gave the running session ${String(fresh.length)} new message(s)`,
       );
@@ -280,6 +308,7 @@ export async function executeRun(host: RunHost, job: RunJob): Promise<void> {
       room: candidate.room,
       runDir: logDir,
       resultFile,
+      ...(quiet ? { replyOnly: true } : {}),
     },
   });
 
@@ -319,6 +348,7 @@ export async function executeRun(host: RunHost, job: RunJob): Promise<void> {
         OGURI_RUN_DIR: logDir,
         OGURI_RESULT_FILE: resultFile,
         OGURI_SESSION_FILE: sessionFile(logDir),
+        ...(quiet ? { OGURI_TASK_REPLY_ONLY: "1" } : {}),
       },
     });
   } finally {
@@ -326,13 +356,25 @@ export async function executeRun(host: RunHost, job: RunJob): Promise<void> {
     clearInterval(checker);
     if (liveTimer !== undefined) clearInterval(liveTimer);
   }
-  // What the session was given while it ran was answered by it.
-  if (delivered.length > 0) await addConsumed(home, candidate.taskId, delivered);
+  // Written to the session is not read by it: only what the session echoed
+  // back was answered. The rest comes round again as a follow-up.
+  const echoed = result.messagesRead ?? 0;
+  const answered = delivered.filter((batch) => batch.write <= echoed).flatMap((batch) => batch.ids);
+  if (answered.length > 0) await addConsumed(home, candidate.taskId, answered);
 
   record.finishedAt = new Date().toISOString();
   record.durationMs = result.durationMs;
   record.exitCode = result.exitCode;
   record.timedOut = result.timedOut;
+  if (result.reapedBackground !== undefined && result.reapedBackground > 0) {
+    record.reapedBackground = result.reapedBackground;
+  }
+  // What the run cost is the session's cumulative figure, exactly as the log
+  // prints it; `usage.ts` subtracts what the session had already spent.
+  // What the service says it ran is evidence of the outcome; it is recorded
+  // apart from what the argv asked for, so neither stands in for the other.
+  const output = parseRunOutput(result.stdoutTail);
+  if (output.costUsd !== undefined) record.costUsd = output.costUsd;
   if (candidate.session !== undefined) {
     const session = await readSession(candidate.session, logDir);
     // A resumed session keeps its id when the runner does not repeat it.
@@ -340,6 +382,24 @@ export async function executeRun(host: RunHost, job: RunJob): Promise<void> {
     if (id !== undefined) record.sessionId = id;
     // The agent's answer, not the JSON envelope around it, is what a summary quotes.
     if (session.text !== undefined) result = { ...result, stdoutTail: session.text };
+    // Only the service's own output sets this. A run whose output names no
+    // model records none, rather than echoing back what was asked for.
+    if (session.model !== undefined) record.modelReported = session.model;
+    if (session.modelSource !== undefined) record.modelSource = session.modelSource;
+    if (session.modelInitialized !== undefined) record.modelInitialized = session.modelInitialized;
+    if (session.modelsUsage !== undefined) record.modelsUsage = session.modelsUsage;
+  }
+  // The flag the run started with is evidence of the request, kept separately:
+  // it says what was asked for, never that the service accepted or used it.
+  const asked = runnerModel(argv);
+  if (asked !== undefined) record.modelRequested = asked;
+  const effort = runnerEffort(argv);
+  if (effort !== undefined) record.effortRequested = effort;
+  // A run with no session still has a price; the log carries it only in some
+  // modes, so read it from the log when the tail that was parsed had none.
+  if (record.costUsd === undefined) {
+    const logged = await readRunCost(logDir);
+    if (logged !== null) record.costUsd = logged;
   }
 
   // `abandon` already wrote the record, and the process is about to exit.
@@ -361,21 +421,34 @@ export async function executeRun(host: RunHost, job: RunJob): Promise<void> {
     return;
   }
 
-  const read: ResultRead = await readResult(resultFile);
-  if (read.kind === "invalid") record.note = `result.json ignored: ${read.reason}`;
+  const read: ResultRead = requiredResult(
+    await readResult(resultFile),
+    result,
+    policy.runners[candidate.runner]?.requireResult === true,
+  );
+  // Kept on the record either way: the run happened, and the person reading
+  // `oguri worker runs` must be able to see why its own account was refused,
+  // or that it gave none.
+  if (read.kind === "invalid") record.note = `result.json rejected: ${read.reason}`;
+  else if (read.kind === "absent" && succeeded(result)) record.note = "no result.json written";
   const question = read.kind === "valid" ? read.result.needsHuman : undefined;
 
   if (quiet) {
     // The task stays completed, so nothing is published to it. The answer
     // goes to the thread: as a relay for a chat, as a plain message otherwise.
-    const ok = succeeded(result) && question === undefined;
+    // A rejected result.json is not an answer either: the run said something
+    // unreadable about itself, so the person is told that rather than a tail
+    // presented as the result.
+    const rejection =
+      read.kind === "invalid" ? `its result.json was rejected: ${read.reason}` : undefined;
+    const ok = succeeded(result) && question === undefined && rejection === undefined;
     record.outcome = ok ? "answered" : "failed";
     if (relayTarget !== undefined) {
       await relay({
         action: ok ? "completed" : "blocked",
         ...answerFor(read, result),
         ...(question === undefined ? {} : { question }),
-        failure: failureReason(result, timeoutMinutes),
+        failure: rejection ?? failureReason(result, timeoutMinutes),
       });
     } else if (replyTo !== undefined && candidate.thread !== undefined) {
       try {
@@ -386,12 +459,34 @@ export async function executeRun(host: RunHost, job: RunJob): Promise<void> {
             runner: candidate.runner,
             where,
             timeoutMinutes,
-            ...(read.kind === "valid" ? { structured: read.result.summary } : {}),
+            ...(read.kind === "valid" ? { structured: resultSummary(read.result) } : {}),
+            ...(read.kind === "invalid" ? { invalidResult: read.reason } : {}),
           }),
         );
       } catch (error) {
         record.outcome = "unreported";
         record.note = describeError(error);
+        record.pendingReport = holdReport(
+          {
+            action: "note",
+            body: summarise(result, {
+              runner: candidate.runner,
+              where,
+              timeoutMinutes,
+              ...(read.kind === "valid" ? { structured: read.result.summary } : {}),
+              ...(read.kind === "invalid" ? { invalidResult: read.reason } : {}),
+            }),
+            refs: [],
+            needsHuman: false,
+            post: {
+              thread: candidate.thread,
+              inReplyTo: replyTo,
+              settleAs: ok ? "answered" : "failed",
+            },
+          },
+          host.now(),
+          error,
+        );
       }
     }
     await writeRunRecord(home, record);
@@ -417,9 +512,39 @@ export async function executeRun(host: RunHost, job: RunJob): Promise<void> {
     openChildren,
   });
 
-  let failure = failureReason(result, timeoutMinutes);
+  // Why the chat is not told the work is done. When the run exited 0 the
+  // rejected file is the whole reason, and "exited with code 0" would say
+  // nothing; when it also failed, the failure is the more useful sentence.
+  let failure =
+    read.kind === "invalid" && succeeded(result)
+      ? `its result.json was rejected: ${read.reason}`
+      : failureReason(result, timeoutMinutes);
   try {
-    await update(report.action, report.body, {
+    // A failed run that will be tried again may climb one tier first (ADR
+    // 0034). The refinement goes out while this worker still holds the task,
+    // so whoever claims it next reads the new tier from the task itself. A
+    // refinement that fails leaves the tier as it was, and the body says so.
+    let body = report.body;
+    if (report.action === "released") {
+      const step = escalateCandidate(policy, candidate, host.gate);
+      if ("definition" in step) {
+        try {
+          await backend.call("taskUpdate", {
+            room: candidate.room,
+            taskId: candidate.taskId,
+            input: { action: "refined", body: step.definition },
+          });
+          body = `${body}\n${step.note}`;
+          record.escalatedTo = { tier: step.tier, runner: step.runner, step: step.step };
+          host.log(`${candidate.taskId} moves up to tier ${step.tier} (${step.runner})`);
+        } catch (error) {
+          body = `${body}\nIt could not be moved up a tier: ${describeError(error)}.`;
+        }
+      } else if (candidate.tier !== undefined) {
+        body = `${body}\nIt stays at tier ${candidate.tier}: ${step.stay}.`;
+      }
+    }
+    await update(report.action, body, {
       refs: report.refs,
       needsHuman: report.needsHuman,
     });
@@ -458,11 +583,35 @@ export async function executeRun(host: RunHost, job: RunJob): Promise<void> {
     // is the output itself being refused.
     record.note = describeError(error);
     failure = `its report was refused: ${describeError(error)}`;
+    const fallback = fallbackReport(result, timeoutMinutes, describeError(error), where);
     try {
-      await update("blocked", fallbackReport(result, timeoutMinutes, describeError(error), where));
+      await update("blocked", fallback);
       record.outcome = "blocked";
     } catch {
       record.outcome = "unreported";
+      record.pendingReport = holdReport(
+        {
+          action: report.action,
+          body: report.body,
+          refs: report.refs,
+          needsHuman: report.needsHuman,
+          fallbackBody: fallback,
+          ...(relayTarget === undefined || replyTo === undefined
+            ? {}
+            : {
+                relay: {
+                  ...relayTarget,
+                  inReplyTo: replyTo,
+                  action: report.action,
+                  ...answerFor(read, result),
+                  ...(report.needsHuman && question !== undefined ? { question } : {}),
+                  failure,
+                },
+              }),
+        },
+        host.now(),
+        error,
+      );
     }
   }
   await writeRunRecord(home, record);
@@ -476,6 +625,17 @@ export async function executeRun(host: RunHost, job: RunJob): Promise<void> {
     });
   }
   host.log(`${candidate.taskId} ${record.outcome} after ${formatDuration(result.durationMs)}`);
+}
+
+/**
+ * A runner that requires `result.json` has no completion without one. A run
+ * that exited 0 and wrote none is read as a rejected file, so it takes the
+ * same path: the retry rules, with the reason kept. A run that already failed
+ * keeps its own failure as the reason.
+ */
+function requiredResult(read: ResultRead, result: RunResult, required: boolean): ResultRead {
+  if (!required || read.kind !== "absent" || !succeeded(result)) return read;
+  return { kind: "invalid", reason: RESULT_REQUIRED_REASON };
 }
 
 /**

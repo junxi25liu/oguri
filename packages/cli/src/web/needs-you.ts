@@ -10,7 +10,9 @@
  *   the code host, so it cannot tell whether the PR merged. It lists them for
  *   `PR_WINDOW_DAYS` after completion, the same window a worker takes follow-ups in.
  *
- * Pure: the caller reads the rooms, this decides.
+ * Pure: the caller reads the rooms, this decides. The dashboard uses
+ * `messageId` and `taskId` to locate the message/result and to open a chat
+ * about the task; it never invents a link that the message did not publish.
  */
 
 import type { TaskStatus } from "@oguri/core";
@@ -35,6 +37,8 @@ export interface NeedsYouItem {
   link: string | null;
   /** The message to look at. */
   messageId: string;
+  /** The task thread, for locating a conversation in the room log. */
+  thread?: string | null;
 }
 
 /** A ref that is a web link. The worker publishes a run's `pr` as a bare URL. */
@@ -59,6 +63,7 @@ export function needsYou(
       room,
       source: task.origin?.source ?? null,
       requester: task.origin?.requester ?? null,
+      thread: status.thread,
     };
     const current = byId.get(status.currentMessageId);
 
@@ -118,6 +123,17 @@ const ORDER: Record<NeedsYouReason, number> = {
 /** Decisions first, then unanswered questions, then pull requests; oldest first within each. */
 export function sortNeedsYou(items: readonly NeedsYouItem[]): NeedsYouItem[] {
   return [...items].sort(
-    (a, b) => ORDER[a.reason] - ORDER[b.reason] || a.since.localeCompare(b.since),
+    (a, b) =>
+      ORDER[a.reason] - ORDER[b.reason] ||
+      a.since.localeCompare(b.since) ||
+      a.taskId.localeCompare(b.taskId),
   );
+}
+
+/** One item, or null. The dashboard highlights it when a task is selected. */
+export function needsYouForTask(
+  items: readonly NeedsYouItem[],
+  taskId: string,
+): NeedsYouItem | null {
+  return sortNeedsYou(items).find((item) => item.taskId === taskId) ?? null;
 }

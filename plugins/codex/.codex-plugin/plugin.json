@@ -1,6 +1,6 @@
 {
   "name": "oguri",
-  "version": "1.0.1",
+  "version": "1.0.5",
   "description": "Coordinate coding agents through a Git-backed oguri network with focused inbox, messaging, task, review, setup, handoff, and consultation workflows.",
   "author": {
     "name": "Alexander",

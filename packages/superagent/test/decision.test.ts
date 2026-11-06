@@ -7,6 +7,7 @@ import { RouteError, parseRouteDecision, type RouteScope } from "../src/decision
 import { isBigRequest } from "../src/big.ts";
 import { isSmallRequest } from "../src/small.ts";
 import { BIG_KINDS, COORDINATOR_KINDS, SMALL_KINDS } from "../src/act.ts";
+import { buildRules } from "../src/prompt.ts";
 
 /**
  * The code that checks a superagent's model (ADR 0031). The model's reply is
@@ -16,6 +17,9 @@ import { BIG_KINDS, COORDINATOR_KINDS, SMALL_KINDS } from "../src/act.ts";
 
 const TASK = "01K0000000000000000000000A";
 const ENDED = "01K0000000000000000000000B";
+const CANCELLED = "01K0000000000000000000000C";
+const STUCK = "01K0000000000000000000000D";
+const RUNNING = "01K0000000000000000000000E";
 
 const scope: RouteScope = {
   kinds: BIG_KINDS,
@@ -23,8 +27,11 @@ const scope: RouteScope = {
   targets: ["box-claude", "machine:box"],
   capabilities: ["gpu"],
   tasks: [
-    { id: TASK, open: true },
-    { id: ENDED, open: false },
+    { id: TASK, open: true, state: "open", dependsOn: [] },
+    { id: ENDED, open: false, state: "completed" },
+    { id: CANCELLED, open: false, state: "cancelled" },
+    { id: STUCK, open: true, state: "open", dependsOn: [CANCELLED, TASK] },
+    { id: RUNNING, open: true, state: "in_progress", dependsOn: [] },
   ],
   mayAnswer: true,
   maxSteps: 8,
@@ -89,6 +96,154 @@ describe("parseRouteDecision", () => {
     );
   });
 
+  it("reads a relink that drops a cancelled dependency", () => {
+    const decision = parseRouteDecision(
+      { kind: "relink", taskId: STUCK, removeDependsOn: [CANCELLED], reason: "not needed" },
+      scope,
+    );
+    assert.deepEqual(decision, {
+      kind: "relink",
+      taskId: STUCK,
+      addDependsOn: [],
+      removeDependsOn: [CANCELLED],
+      reason: "not needed",
+    });
+    assert.equal(
+      parseRouteDecision(
+        {
+          kind: "relink",
+          taskId: STUCK,
+          addDependsOn: [ENDED],
+          removeDependsOn: [CANCELLED],
+          reason: "x",
+        },
+        scope,
+      ).kind,
+      "relink",
+    );
+  });
+
+  it("refuses a relink that cannot work", () => {
+    refused({ kind: "relink", taskId: STUCK, reason: "x" }, /at least one task/);
+    refused(
+      { kind: "relink", taskId: RUNNING, removeDependsOn: [CANCELLED], reason: "x" },
+      /already started or ended/,
+    );
+    refused(
+      { kind: "relink", taskId: ENDED, addDependsOn: [TASK], reason: "x" },
+      /already started or ended/,
+    );
+    refused(
+      { kind: "relink", taskId: STUCK, removeDependsOn: [ENDED], reason: "x" },
+      /is not a dependency of task/,
+    );
+    refused(
+      { kind: "relink", taskId: STUCK, addDependsOn: ["01K0000000000000000000000Z"], reason: "x" },
+      /was not in the snapshot/,
+    );
+    refused({ kind: "relink", taskId: STUCK, addDependsOn: [STUCK], reason: "x" }, /itself/);
+    refused(
+      {
+        kind: "relink",
+        taskId: STUCK,
+        addDependsOn: [ENDED],
+        removeDependsOn: [ENDED],
+        reason: "x",
+      },
+      /both added and removed/,
+    );
+    refused(
+      {
+        kind: "relink",
+        taskId: "01K0000000000000000000000Z",
+        removeDependsOn: [TASK],
+        reason: "x",
+      },
+      /was not in the snapshot/,
+    );
+  });
+
+  it("reads a replacement only for a cancelled task", () => {
+    const decision = parseRouteDecision(
+      {
+        kind: "replace",
+        taskId: CANCELLED,
+        title: "Redo the migration",
+        target: "box-claude",
+        reason: "still needed",
+      },
+      scope,
+    );
+    assert.equal(decision.kind === "replace" ? decision.taskId : "", CANCELLED);
+    refused(
+      { kind: "replace", taskId: TASK, title: "Redo", target: "box-claude", reason: "x" },
+      /is not cancelled/,
+    );
+    refused(
+      { kind: "replace", taskId: CANCELLED, title: "Redo", target: "machine:moon", reason: "x" },
+      /not on the roster/,
+    );
+    const { target: _target, ...unaddressed } = {
+      kind: "replace",
+      taskId: CANCELLED,
+      title: "Redo",
+      target: "box-claude",
+      reason: "x",
+    };
+    refused(unaddressed, /names no target or required capability/);
+  });
+
+  it("reads a request for a person to authorize a runner, and nothing more", () => {
+    const decision = parseRouteDecision(
+      {
+        kind: "request_runner",
+        runner: "codex-high",
+        machine: "machine:box",
+        taskId: TASK,
+        reason: "the task needs it",
+      },
+      scope,
+    );
+    assert.equal(decision.kind, "request_runner");
+    assert.equal(decision.kind === "request_runner" ? decision.runner : "", "codex-high");
+    refused({ kind: "request_runner", runner: "Not A Runner!", reason: "x" }, /not a runner name/);
+    refused({ kind: "request_runner", reason: "x" }, /'runner' is missing/);
+    refused(
+      { kind: "request_runner", runner: "codex", machine: "machine:moon", reason: "x" },
+      /not on the roster/,
+    );
+    refused(
+      {
+        kind: "request_runner",
+        runner: "codex",
+        taskId: "01K0000000000000000000000Z",
+        reason: "x",
+      },
+      /was not in the snapshot/,
+    );
+    refused(
+      {
+        kind: "request_runner",
+        runner: "codex",
+        reason: "token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB",
+      },
+      /secret/,
+    );
+  });
+
+  it("offers the new decisions to Big and to coordination, but not to a small superagent", () => {
+    for (const kind of ["relink", "replace", "request_runner"] as const) {
+      assert.ok(BIG_KINDS.includes(kind), `Big can ${kind}`);
+      assert.ok(COORDINATOR_KINDS.includes(kind), `coordination can ${kind}`);
+      assert.ok(!SMALL_KINDS.includes(kind), `a small superagent cannot ${kind}`);
+    }
+    refused(
+      { kind: "relink", taskId: STUCK, removeDependsOn: [CANCELLED], reason: "x" },
+      /not a decision this superagent may make/,
+      { ...scope, kinds: SMALL_KINDS },
+    );
+  });
+
   it("refuses a kind the role may not choose", () => {
     refused({ ...accept }, /not a decision this superagent may make/, {
       ...scope,
@@ -137,6 +292,51 @@ describe("parseRouteDecision", () => {
   });
 });
 
+describe("Big's rules keep the work moving", () => {
+  const rules = (role: "big" | "small" | "coordinator") =>
+    buildRules({
+      role,
+      kinds: BIG_KINDS,
+      allKinds: role === "small" ? SMALL_KINDS : BIG_KINDS,
+      self: "alice-big",
+      defaultRoom: "superagent",
+      maxSteps: 8,
+    });
+
+  it("says an unset budget is not a ban, and only an explicit hard limit stops work", () => {
+    const text = rules("big");
+    assert.match(text, /budget that is not set is not a ban/i);
+    assert.match(text, /explicit hard limit/);
+  });
+
+  it("deploys a missing executor itself, and asks for a missing runner instead of waiting", () => {
+    const text = rules("big");
+    assert.match(text, /deploy one yourself with accept or plan/);
+    assert.match(text, /request_runner to ask the owner/);
+    assert.match(text, /do not stop other work that does not need that runner/);
+  });
+
+  it("makes every block end in an action, and names the three ways out of a cancelled dependency", () => {
+    const text = rules("big");
+    assert.match(text, /the decision itself is the next step/);
+    assert.match(text, /relink to drop it, replace to rebuild/);
+    assert.match(text, /leaving it is never a decision/);
+  });
+
+  it("describes the new decisions with the fields the parser reads", () => {
+    const text = rules("big");
+    assert.match(text, /- relink:[\s\S]*removeDependsOn[\s\S]*addDependsOn/);
+    assert.match(text, /- replace:[\s\S]*taskId \(the cancelled task\)/);
+    assert.match(text, /- request_runner:[\s\S]*it does not authorize anything/);
+  });
+
+  it("does not hand a small superagent the big one's rules or its new decisions", () => {
+    const text = rules("small");
+    assert.doesNotMatch(text, /Keep the work moving/);
+    assert.doesNotMatch(text, /budget that is not set/);
+  });
+});
+
 describe("who a superagent listens to", () => {
   const state = { handled: [] as string[], since: "2026-01-01T00:00:00.000Z" };
   const message = (tags: string[], mentions: string[] = [], ts = "2026-06-01T00:00:00.000Z") =>
@@ -161,10 +361,10 @@ describe("who a superagent listens to", () => {
 });
 
 describe("the superagent policy", () => {
-  it("lets the small superagent run up to 16 workers, 3 by default", () => {
+  it("lets the small superagent run up to 20 workers, 3 by default", () => {
     assert.equal(parseSuperagentPolicy({}, "policy.yaml").small.maxWorkers, 3);
-    assert.equal(parseSuperagentPolicy({ small: { maxWorkers: 16 } }, "p").small.maxWorkers, 16);
-    assert.throws(() => parseSuperagentPolicy({ small: { maxWorkers: 17 } }, "p"), /1 to 16/);
+    assert.equal(parseSuperagentPolicy({ small: { maxWorkers: 20 } }, "p").small.maxWorkers, 20);
+    assert.throws(() => parseSuperagentPolicy({ small: { maxWorkers: 21 } }, "p"), /1 to 20/);
   });
 
   it("is off by default and checks every key", () => {

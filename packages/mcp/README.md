@@ -18,7 +18,7 @@ live in the repository.
 
 ## The tool surface
 
-18 tools, each owning one resource or one intent. Where a tool covers several modes of
+19 tools, each owning one resource or one intent. Where a tool covers several modes of
 the same resource, it dispatches on a single `action`, `view`, or `scope` argument rather than
 splitting into near-identical siblings — the surface is loaded into every session before the
 agent decides anything, so a tool earns its place by answering a question no neighbour does.
@@ -55,6 +55,7 @@ agent decides anything, so a tool earns its place by answering a question no nei
 | `oguri_claim`  | `action`: `acquire` \| `release` \| `list`                    | advisory lease on a resource only one agent may hold |
 | `oguri_wait`   | —                                                             | one bounded block for an arrival, never a poll loop  |
 | `oguri_sync`   | —                                                             | poll the remote now; redundant under the daemon      |
+| `oguri_runner` | `action`: `list` \| `request`                                 | which runners may run here; ask a person for one     |
 
 ### Resources
 

@@ -17,19 +17,41 @@ export {
   taskRuns,
   writeRunRecord,
 } from "./runs.ts";
-export type { RunOutcome, RunRecord } from "./runs.ts";
+export type { RunOutcome, PendingReport, RunRecord } from "./runs.ts";
 
-export { localDate, parseTotalCost, todayUsage } from "./usage.ts";
-export type { TodayUsage } from "./usage.ts";
+export { localDate, parseRunOutput, parseTotalCost, readRunCost, todayUsage } from "./usage.ts";
+export type { RunOutput, TodayUsage } from "./usage.ts";
 
-export { parseRunnerHint, resolveRunner, selectCandidates } from "./select.ts";
-export type { Candidate, Selection, Skipped } from "./select.ts";
+export {
+  compareCandidates,
+  effortSourceOf,
+  parseRunnerHint,
+  resolveEffort,
+  resolveHint,
+  resolveRunner,
+  selectCandidates,
+} from "./select.ts";
+export type { Candidate, RunnerHint, Selection, Skipped } from "./select.ts";
+
+export { escalateCandidate } from "./escalate.ts";
+export type { EscalationStep } from "./escalate.ts";
+export { followupEffort } from "./followup.ts";
 
 export { SUMMARY_LIMIT, formatDuration, summarise } from "./summary.ts";
 export type { SummaryContext } from "./summary.ts";
 
 export { reconcileRuns } from "./recover.ts";
 export type { Recovered, RecoveryOptions } from "./recover.ts";
+
+export {
+  REPORT_RETRY_FIRST_MS,
+  REPORT_RETRY_MAX_MS,
+  REPORT_STUCK_ATTEMPTS,
+  reconcileReports,
+  reportDelayMs,
+  reportStuck,
+} from "./report.ts";
+export type { ReportOptions, Reported } from "./report.ts";
 
 export { abandonAction, claimRefusal, stopReason } from "./lifecycle.ts";
 
@@ -66,6 +88,8 @@ export {
   parseCodexJsonl,
   readSession,
   resumeArgv,
+  runnerEffort,
+  runnerModel,
   sessionFile,
   validSessionId,
 } from "./session.ts";

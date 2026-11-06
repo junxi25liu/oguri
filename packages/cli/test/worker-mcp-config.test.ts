@@ -96,12 +96,12 @@ describe("the MCP command it prints", () => {
   });
 
   it("runs a single-file binary as `oguri mcp`, which has no import.meta.url to resolve from", () => {
-    assert.deepEqual(mcpCommandFor("/Users/b/.local/bin/oguri", "/Users/b/.local/bin/oguri"), {
-      command: "/Users/b/.local/bin/oguri",
+    assert.deepEqual(mcpCommandFor("/home/user/.local/bin/oguri", "/home/user/.local/bin/oguri"), {
+      command: "/home/user/.local/bin/oguri",
       args: ["mcp"],
     });
-    assert.deepEqual(mcpCommandFor("/Users/b/.local/bin/oguri", undefined), {
-      command: "/Users/b/.local/bin/oguri",
+    assert.deepEqual(mcpCommandFor("/home/user/.local/bin/oguri", undefined), {
+      command: "/home/user/.local/bin/oguri",
       args: ["mcp"],
     });
   });

@@ -58,8 +58,14 @@ export interface SummaryContext {
   branch?: string;
   /** The `summary` of a valid `result.json`, used instead of the output. */
   structured?: string;
-  /** Why `result.json` was ignored, when it existed and was invalid. */
+  /** Why `result.json` was rejected, when it existed and was invalid. */
   invalidResult?: string;
+  /**
+   * The run exited 0 on a runner that does not require `result.json`, and
+   * wrote none. It still completes; the report says the text below is the end
+   * of its output, not a result it submitted.
+   */
+  noResult?: boolean;
   /** What happens next, for a failed run: released for a retry, or blocked. */
   next?: string;
 }
@@ -72,10 +78,14 @@ export interface SummaryContext {
  */
 export function summarise(result: RunResult, context: SummaryContext): string {
   const ok = succeeded(result);
+  // An exit code of 0 is not a completion when the run's own account of itself
+  // was rejected: saying "Done by worker" there is the report that lied.
   const head = [
-    ok
-      ? `Done by worker (runner ${context.runner}, ${formatDuration(result.durationMs)}).`
-      : `Worker run failed: ${failureReason(result, context.timeoutMinutes)}.`,
+    context.invalidResult !== undefined && ok
+      ? `Worker run ended (runner ${context.runner}, ${formatDuration(result.durationMs)}) but its result.json was rejected, so this is not reported as a completion.`
+      : ok
+        ? `Done by worker (runner ${context.runner}, ${formatDuration(result.durationMs)}).`
+        : `Worker run failed: ${failureReason(result, context.timeoutMinutes)}.`,
     ...(context.next === undefined ? [] : [context.next]),
   ].join(" ");
   const footer =
@@ -91,15 +101,17 @@ export function summarise(result: RunResult, context: SummaryContext): string {
     return `${head}\n\n${text}${truncated ? "\n\n(summary truncated)" : ""}\n\n${footer}`;
   }
 
-  const ignored =
-    context.invalidResult === undefined
-      ? ""
-      : `result.json was ignored: ${context.invalidResult}. The output is reported instead.\n\n`;
+  const note =
+    context.invalidResult !== undefined
+      ? `result.json was rejected: ${context.invalidResult}. Nothing in it was published; the output is below.\n\n`
+      : context.noResult === true && ok
+        ? "Note: no result.json was written, so this is the end of the run's output, not a result it submitted.\n\n"
+        : "";
   const { text, truncated } = tailOf(result.stdoutTail, SUMMARY_LIMIT);
-  if (text.length === 0) return `${head}\n\n${ignored}${footer}`;
+  if (text.length === 0) return `${head}\n\n${note}${footer}`;
   if (hasSecrets(text)) {
-    return `${head}\n\n${ignored}Output withheld: the secret scanner flagged it.\n\n${footer}`;
+    return `${head}\n\n${note}Output withheld: the secret scanner flagged it.\n\n${footer}`;
   }
   const label = truncated ? "Last part of the output:" : "Output:";
-  return `${head}\n\n${ignored}${label}\n\n${text}\n\n${footer}`;
+  return `${head}\n\n${note}${label}\n\n${text}\n\n${footer}`;
 }

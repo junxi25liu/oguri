@@ -8,7 +8,7 @@
 
 import { hasSecrets, type WorkerPolicy } from "@oguri/core";
 
-import { QUESTION_LIMIT, resultRefs, type ResultRead } from "./result.ts";
+import { QUESTION_LIMIT, resultRefs, resultSummary, type ResultRead } from "./result.ts";
 import { failureAction } from "./retry.ts";
 import type { RunResult } from "./runner.ts";
 import { SUMMARY_LIMIT, failureReason, succeeded, summarise } from "./summary.ts";
@@ -60,11 +60,16 @@ function question(text: string): string {
  *   created are still open.
  * - `needsHuman` in `result.json`, whatever the exit code: `blocked` with
  *   `needs: human`, because the agent itself said a person must decide.
+ * - A `result.json` that exists but is invalid: never `completed`, whatever the
+ *   exit code. The file is the run's account of itself and it is not usable, so
+ *   the task goes back through the retry rules with the reason kept, exactly as
+ *   a failed run would. Completing it would publish a result nobody can check.
  * - Failure: `released` while attempts remain and the policy allows it,
  *   otherwise `blocked`; `needs: human` once attempts are used up.
  */
 export function buildReport(input: ReportInput): RunReport {
   const structured = input.read.kind === "valid" ? input.read.result : undefined;
+  const rejected = input.read.kind === "invalid" ? input.read.reason : undefined;
   const { refs, dropped } = resultRefs({
     ...(structured === undefined ? {} : { result: structured }),
     ...(input.branch === undefined ? {} : { worktreeBranch: input.branch }),
@@ -76,8 +81,9 @@ export function buildReport(input: ReportInput): RunReport {
     where: input.where,
     timeoutMinutes: input.policy.timeoutMinutes,
     ...(input.branch === undefined ? {} : { branch: input.branch }),
-    ...(structured === undefined ? {} : { structured: structured.summary }),
-    ...(input.read.kind === "invalid" ? { invalidResult: input.read.reason } : {}),
+    ...(structured === undefined ? {} : { structured: resultSummary(structured) }),
+    ...(rejected === undefined ? {} : { invalidResult: rejected }),
+    ...(input.read.kind === "absent" ? { noResult: true } : {}),
   };
   const withDropped = (body: string): string =>
     dropped === 0
@@ -92,7 +98,7 @@ export function buildReport(input: ReportInput): RunReport {
     return { action: "blocked", body: withDropped(body), refs, needsHuman: true };
   }
 
-  if (succeeded(input.result)) {
+  if (rejected === undefined && succeeded(input.result)) {
     const open = input.openChildren ?? 0;
     if (open > 0) {
       const body = summarise(input.result, {
@@ -125,7 +131,11 @@ export function buildReport(input: ReportInput): RunReport {
     next:
       next.action === "released"
         ? `Released for another try${attempts}; any eligible machine may take it.`
-        : `Blocked${attempts}: ${next.reason}.`,
+        : `Blocked${attempts}: ${
+            rejected === undefined
+              ? next.reason
+              : "the run's result.json was rejected, so nothing it said was published"
+          }.`,
   });
   return {
     action: next.action,

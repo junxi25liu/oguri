@@ -75,6 +75,8 @@ export interface ToolEnv {
   room: string;
   runDir: string;
   resultFile: string;
+  /** A follow-up answering on a task that stays completed (ADR 0036). */
+  replyOnly?: boolean;
 }
 
 function serverEnv(env: ToolEnv): Record<string, string> {
@@ -85,6 +87,7 @@ function serverEnv(env: ToolEnv): Record<string, string> {
     OGURI_TASK_ROOM: env.room,
     OGURI_RUN_DIR: env.runDir,
     OGURI_RESULT_FILE: env.resultFile,
+    ...(env.replyOnly === true ? { OGURI_TASK_REPLY_ONLY: "1" } : {}),
   };
 }
 

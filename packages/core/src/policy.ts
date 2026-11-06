@@ -12,17 +12,21 @@ import {
   type NotificationPolicy,
 } from "./notification-policy.ts";
 // --- end notifications ---
-import { MODEL_NAME } from "./runner-model.ts";
+import { EFFORT_NAME, MODEL_NAME, runnerFlavor } from "./runner-model.ts";
 // --- intake (ADR 0030) ---
 import { DEFAULT_INTAKE_POLICY, parseIntakePolicy, type IntakePolicy } from "./intake-policy.ts";
 // --- end intake ---
 // --- superagent (ADR 0031) ---
 import {
   DEFAULT_SUPERAGENT_POLICY,
+  MAX_RUN_CONCURRENCY,
   parseSuperagentPolicy,
   type SuperagentPolicy,
 } from "./superagent-policy.ts";
 // --- end superagent ---
+
+// The ceiling both `worker.concurrency` and `superagent.small.maxWorkers` use.
+export { MAX_RUN_CONCURRENCY };
 
 /**
  * Machine-local operating policy — the file a person edits by hand.
@@ -126,6 +130,20 @@ export interface WorkerRunner {
    * planner add `--model <m>` or `-m <m>` unless the argv already chose one.
    */
   model?: string;
+  /**
+   * Reasoning effort a `claude` argv should use. Added as `--effort <level>`
+   * unless the argv already chose one. Only `claude` understands the flag, so
+   * setting this on any other command is an error rather than a silent no-op.
+   */
+  effort?: string;
+  /**
+   * The only effort levels a task may ask for on this runner, by first line.
+   *
+   * Empty or absent means a task cannot change the effort at all: the runner
+   * uses `effort`, or whatever its argv already chose. This is an allow-list of
+   * values written by the machine owner, never a value from the network.
+   */
+  efforts?: string[];
   /** Directory this runner starts in. Overrides `worker.workdir`. */
   workdir?: string;
   /**
@@ -147,6 +165,39 @@ export interface WorkerRunner {
    * two; false leaves the argv exactly as written.
    */
   oguriTools?: boolean;
+  /**
+   * The runner follows the `result.json` protocol: a run that exits 0 without
+   * writing the file is not a completion, and goes through the retry rules.
+   * Absent or false keeps the older behaviour for runners with no such
+   * protocol (a chat runner): the run completes and the report says no file
+   * was written.
+   */
+  requireResult?: boolean;
+}
+
+/**
+ * One tier of runners: a named rung on the cost ladder (ADR 0034).
+ *
+ * Tiers only group runners the owner already listed under `worker.runners`;
+ * they add no command and no argument. A superagent picks a tier by how hard
+ * and risky a task is, and a task names it on its header line `tier: <name>`.
+ */
+export interface WorkerTier {
+  name: string;
+  /** Entries of `worker.runners`, preferred first. Never empty. */
+  runners: string[];
+  /** Effort a task in this tier runs at unless it names one. On every runner's `efforts`. */
+  effort?: string;
+}
+
+/**
+ * How far a failed task may climb the tiers.
+ *
+ * A failed run that is released for another try moves its task one tier up,
+ * at most `maxSteps` times in the task's life. 0 turns climbing off.
+ */
+export interface WorkerEscalationPolicy {
+  maxSteps: number;
 }
 
 /**
@@ -160,7 +211,13 @@ export interface WorkerRunner {
  */
 export interface WorkerPolicy {
   enabled: boolean;
-  /** Runs allowed at the same time. */
+  /**
+   * Runs allowed at the same time, as this worker is configured.
+   *
+   * The value actually in force is `effectiveConcurrency`, which a small
+   * superagent's `maxWorkers` replaces while that role is on. Status output
+   * reads that, so a machine never reports a number it is not running.
+   */
   concurrency: number;
   /** Runs started per rolling hour. */
   maxPerHour: number;
@@ -204,6 +261,19 @@ export interface WorkerPolicy {
    * on tasks that are not finished are always taken.
    */
   followupDays: number;
+  /**
+   * Runner tiers, cheapest first (ADR 0034). Empty means none: tasks pick a
+   * runner by name, as before.
+   */
+  tiers: WorkerTier[];
+  /** How far a failed task may climb `tiers`. */
+  escalation: WorkerEscalationPolicy;
+  /**
+   * How many parents a subtask created inside a run may have (ADR 0036). 0 means
+   * a run creates no subtasks. What a run creates runs here with no approval, so
+   * this is what bounds a run fanning out into more runs.
+   */
+  maxTaskDepth: number;
 }
 
 export interface LocalPolicy {
@@ -225,13 +295,16 @@ export const DEFAULT_WORKER_POLICY: WorkerPolicy = {
   enabled: false,
   concurrency: 1,
   maxPerHour: 6,
-  timeoutMinutes: 60,
+  timeoutMinutes: 180,
   runners: {},
   trustedRequesters: [],
   onAbandon: "release",
   capabilities: [],
   retry: { backoffMinutes: 10 },
   followupDays: 14,
+  tiers: [],
+  escalation: { maxSteps: 0 },
+  maxTaskDepth: 2,
 };
 
 /** A fresh copy, so no caller can mutate the shared default through a nested value. */
@@ -242,6 +315,8 @@ function defaultWorkerPolicy(): WorkerPolicy {
     trustedRequesters: [],
     capabilities: [],
     retry: { ...DEFAULT_WORKER_POLICY.retry },
+    tiers: [],
+    escalation: { ...DEFAULT_WORKER_POLICY.escalation },
   };
 }
 
@@ -400,16 +475,27 @@ const WORKER_KEYS = [
   "capabilities",
   "retry",
   "followupDays",
+  "tiers",
+  "escalation",
+  "maxTaskDepth",
 ] as const;
+
+const TIER_KEYS = ["runners", "effort"] as const;
+const ESCALATION_KEYS = ["maxSteps"] as const;
+/** A ladder longer than this is a list of runners, not a set of tiers. */
+const MAX_TIERS = 8;
 
 const RUNNER_KEYS = [
   "argv",
   "model",
+  "effort",
+  "efforts",
   "workdir",
   "worktree",
   "resume",
   "session",
   "oguriTools",
+  "requireResult",
 ] as const;
 const RETRY_KEYS = ["onFailure", "backoffMinutes"] as const;
 
@@ -544,13 +630,17 @@ function parseWorkerPolicy(value: unknown, source: string): WorkerPolicy {
     );
   }
 
+  const tiers = parseTiers(worker["tiers"], runners, source);
+
   return {
     enabled,
     concurrency: boundedInt(
       worker["concurrency"],
       DEFAULT_WORKER_POLICY.concurrency,
+      // Ceiled with `superagent.small.maxWorkers`: 20 is enough for a whole
+      // machine's pool, and a typo such as 200 is still refused.
       1,
-      8,
+      MAX_RUN_CONCURRENCY,
       "concurrency",
       source,
     ),
@@ -586,7 +676,141 @@ function parseWorkerPolicy(value: unknown, source: string): WorkerPolicy {
       "followupDays",
       source,
     ),
+    tiers,
+    escalation: parseEscalation(worker["escalation"], tiers, source),
+    maxTaskDepth: boundedInt(
+      worker["maxTaskDepth"],
+      DEFAULT_WORKER_POLICY.maxTaskDepth,
+      0,
+      8,
+      "maxTaskDepth",
+      source,
+    ),
   };
+}
+
+/**
+ * `worker.tiers`: a mapping of tier name to its runners, cheapest tier first.
+ *
+ * A tier is a runner name, a list of them, or a mapping with `runners` and an
+ * optional `effort`. Every name must be an entry of `worker.runners`, and a
+ * tier's `effort` must be on the `efforts` list of every runner in it, so a
+ * tier can never select a command or a level the owner did not write.
+ */
+function parseTiers(
+  value: unknown,
+  runners: Record<string, WorkerRunner>,
+  source: string,
+): WorkerTier[] {
+  if (value === undefined) return [];
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    fail(source, "worker.tiers must be a mapping of tier name to runners, cheapest first");
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > MAX_TIERS) {
+    fail(source, `worker.tiers lists more than ${String(MAX_TIERS)} tiers`);
+  }
+  const tiers: WorkerTier[] = [];
+  const placed = new Map<string, string>();
+  for (const [name, entry] of entries) {
+    const at = `worker.tiers.${name}`;
+    // Tier names appear in task text exactly as runner names do.
+    if (!RUNNER_NAME.test(name)) {
+      fail(source, `worker.tiers has an invalid name '${name}'; use lowercase letters, digits, -`);
+    }
+    let listed: unknown;
+    let effort: unknown;
+    if (typeof entry === "string" || Array.isArray(entry)) {
+      listed = entry;
+    } else if (entry !== null && typeof entry === "object") {
+      const tier = entry as Record<string, unknown>;
+      for (const key of Object.keys(tier)) {
+        if (!(TIER_KEYS as readonly string[]).includes(key)) {
+          fail(source, `unknown key '${at}.${key}'; known keys: ${TIER_KEYS.join(", ")}`);
+        }
+      }
+      listed = tier["runners"];
+      effort = tier["effort"];
+    } else {
+      fail(
+        source,
+        `${at} must be a runner name, a list of runner names, or a mapping with runners`,
+      );
+    }
+    const names = typeof listed === "string" ? [listed] : listed;
+    if (!Array.isArray(names) || names.length === 0) {
+      fail(source, `${at}.runners must list at least one entry of worker.runners`);
+    }
+    const members: string[] = [];
+    for (const runner of names as unknown[]) {
+      if (typeof runner !== "string" || !Object.hasOwn(runners, runner)) {
+        fail(
+          source,
+          `${at} names ${JSON.stringify(runner)}, which is not an entry of worker.runners (${Object.keys(runners).join(", ") || "none"})`,
+        );
+      }
+      // One runner on two rungs would make "one tier up" mean nothing.
+      const other = placed.get(runner);
+      if (other !== undefined && other !== name) {
+        fail(source, `${at} lists runner '${runner}', which is already in tier '${other}'`);
+      }
+      placed.set(runner, name);
+      if (!members.includes(runner)) members.push(runner);
+    }
+    if (effort !== undefined) {
+      if (typeof effort !== "string" || !EFFORT_NAME.test(effort)) {
+        fail(source, `${at}.effort must be an effort level (letters, digits, '_', '-')`);
+      }
+      for (const runner of members) {
+        const allowed = runners[runner]?.efforts ?? [];
+        if (!allowed.includes(effort)) {
+          fail(
+            source,
+            `${at}.effort '${effort}' is not on worker.runners.${runner}.efforts (${allowed.join(", ") || "none"})`,
+          );
+        }
+      }
+    }
+    tiers.push({
+      name,
+      runners: members,
+      ...(effort === undefined ? {} : { effort: effort as string }),
+    });
+  }
+  return tiers;
+}
+
+function parseEscalation(
+  value: unknown,
+  tiers: readonly WorkerTier[],
+  source: string,
+): WorkerEscalationPolicy {
+  if (value === undefined) return { ...DEFAULT_WORKER_POLICY.escalation };
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    fail(source, "worker.escalation must be a mapping with maxSteps");
+  }
+  const escalation = value as Record<string, unknown>;
+  for (const key of Object.keys(escalation)) {
+    if (!(ESCALATION_KEYS as readonly string[]).includes(key)) {
+      fail(
+        source,
+        `unknown key 'worker.escalation.${key}'; known keys: ${ESCALATION_KEYS.join(", ")}`,
+      );
+    }
+  }
+  const maxSteps = boundedInt(
+    escalation["maxSteps"],
+    DEFAULT_WORKER_POLICY.escalation.maxSteps,
+    0,
+    MAX_TIERS - 1,
+    "escalation.maxSteps",
+    source,
+  );
+  // Climbing needs somewhere to climb to; a limit with no ladder is a typo.
+  if (maxSteps > 0 && tiers.length < 2) {
+    fail(source, "worker.escalation.maxSteps needs at least two worker.tiers to climb");
+  }
+  return { maxSteps };
 }
 
 function parseRetryPolicy(value: unknown, source: string): WorkerRetryPolicy {
@@ -671,6 +895,45 @@ function parseRunner(name: string, entry: unknown, source: string): WorkerRunner
       `worker.runners.${name}.model must be a model name (letters, digits, '.', '_', ':', /, -; no spaces)`,
     );
   }
+  const effort = runner["effort"];
+  if (
+    effort !== undefined &&
+    (typeof effort !== "string" || effort.trim() !== effort || !EFFORT_NAME.test(effort))
+  ) {
+    fail(
+      source,
+      `worker.runners.${name}.effort must be an effort level (letters, digits, '_', '-'; no spaces, no leading '-')`,
+    );
+  }
+  // Only claude has an effort flag oguri knows. Refusing the key elsewhere
+  // beats accepting it and then adding nothing, which would leave a person
+  // believing the level is in force.
+  if (effort !== undefined && runnerFlavor(argv) !== "claude") {
+    fail(
+      source,
+      `worker.runners.${name}.effort needs a claude argv (--effort); this runner's command has no effort flag oguri knows`,
+    );
+  }
+  const efforts = runner["efforts"];
+  if (efforts !== undefined && !Array.isArray(efforts)) {
+    fail(source, `worker.runners.${name}.efforts must be a list of effort levels`);
+  }
+  const effortAllowList: string[] = [];
+  for (const level of (efforts ?? []) as unknown[]) {
+    if (typeof level !== "string" || !EFFORT_NAME.test(level)) {
+      fail(
+        source,
+        `worker.runners.${name}.efforts contains an invalid level ${JSON.stringify(level)}; use letters, digits, '_', '-'`,
+      );
+    }
+    if (!effortAllowList.includes(level)) effortAllowList.push(level);
+  }
+  if (effortAllowList.length > 0 && effort === undefined && runnerFlavor(argv) !== "claude") {
+    fail(
+      source,
+      `worker.runners.${name}.efforts needs a claude argv (--effort); a task can only pick a level this command understands`,
+    );
+  }
   const workdir = runner["workdir"];
   if (workdir !== undefined && (typeof workdir !== "string" || workdir.length === 0)) {
     fail(source, `worker.runners.${name}.workdir must be a path`);
@@ -692,6 +955,10 @@ function parseRunner(name: string, entry: unknown, source: string): WorkerRunner
   const oguriTools = runner["oguriTools"];
   if (oguriTools !== undefined && typeof oguriTools !== "boolean") {
     fail(source, `worker.runners.${name}.oguriTools must be true or false`);
+  }
+  const requireResult = runner["requireResult"];
+  if (requireResult !== undefined && typeof requireResult !== "boolean") {
+    fail(source, `worker.runners.${name}.requireResult must be true or false`);
   }
   const resume = runner["resume"];
   if (resume !== undefined) {
@@ -721,11 +988,14 @@ function parseRunner(name: string, entry: unknown, source: string): WorkerRunner
   return {
     argv: [...argv],
     ...(model === undefined ? {} : { model: model as string }),
+    ...(effort === undefined ? {} : { effort: effort as string }),
+    ...(effortAllowList.length === 0 ? {} : { efforts: effortAllowList }),
     ...(workdir === undefined ? {} : { workdir: workdir as string }),
     worktree,
     ...(resume === undefined ? {} : { resume: [...(resume as string[])] }),
     ...(session === undefined ? {} : { session: session as SessionMode }),
     ...(oguriTools === undefined ? {} : { oguriTools: oguriTools as boolean }),
+    ...(requireResult === undefined ? {} : { requireResult: requireResult as boolean }),
   };
 }
 
@@ -819,6 +1089,23 @@ export function approvalRequired(origin: WorkOrigin, policy: ApprovalPolicy): bo
   return origin === "remote";
 }
 
+/**
+ * How many runs this machine may run at once, as the worker engine really
+ * applies it.
+ *
+ * A small superagent replaces `worker.concurrency` with its own `maxWorkers`
+ * while it is on, because it is the role that decides how many workers a
+ * request needs. That substitution lives here rather than in the CLI surface
+ * that builds the worker's policy, so `oguri worker status`,
+ * `oguri superagent status`, and the engine can never disagree about the
+ * number: each asks this one function.
+ */
+export function effectiveConcurrency(policy: Pick<LocalPolicy, "worker" | "superagent">): number {
+  const small = policy.superagent.small;
+  if (!small.enabled) return policy.worker.concurrency;
+  return Math.min(small.maxWorkers, MAX_RUN_CONCURRENCY);
+}
+
 /** A commented starting point, written only by `oguri policy --init`. */
 export function policyTemplate(): string {
   return `# oguri — machine-local policy
@@ -857,24 +1144,27 @@ worker:
   # run them, and report the result? (ADR 0026)
   #
   # It only ever runs the argv listed under 'runners', with NO shell. A task can
-  # pick a runner by name with a first line such as 'runner: codex', but it
-  # cannot add one. The task text is passed on stdin, never on the command line.
+  # pick a runner by name with a first line such as 'runner: codex', and an
+  # effort from that runner's 'efforts' list with 'effort: high', but it cannot
+  # add an argument. The task text is passed on stdin, never on the command line.
   enabled: false
-  concurrency: 1
+  concurrency: 1        # runs at once, 1 to 20
   maxPerHour: 6
-  timeoutMinutes: 60
+  timeoutMinutes: 180   # one run's limit, 1 to 1440; an older config that sets it keeps its value
   # workdir: ~/work
   runners: {}
   #   claude: ["claude", "-p", "--output-format", "text"]
   #   codex: ["codex", "exec", "-"]
-  #   # The mapping form gives a runner its own directory and can name a model.
-  #   # claude gets --model <m>; codex gets -m <m>. An argv that already has
-  #   # its own --model or -m keeps it. With worktree: true each run gets a
-  #   # fresh git worktree of that repository, on a branch named
-  #   # oguri/<task-id>-<run-id>, so concurrent runs never share a checkout.
+  #   # The mapping form gives a runner its own directory and can name a model
+  #   # or an effort. claude gets --model <m> or --effort <level>; codex gets
+  #   # -m <m>. An argv that already has its own flag keeps it. 'efforts' is
+  #   # the list a task may pick from with an 'effort: <level>' line; a level
+  #   # outside it is ignored, and the runner's own effort applies.
   #   fixer:
   #     argv: ["claude", "-p"]
-  #     model: claude-sonnet-4-5
+  #     model: sonnet
+  #     effort: medium
+  #     efforts: [low, medium, high]
   #     workdir: ~/src/app
   #     worktree: true
   #   # A runner that keeps one agent session per task (ADR 0030). session
@@ -884,6 +1174,9 @@ worker:
   #     argv: ["claude", "-p", "--output-format", "json"]
   #     resume: ["claude", "-p", "--output-format", "json", "--resume", "{session}"]
   #     session: claude-json
+  #   # requireResult: true makes a run that exits 0 without writing result.json
+  #   # a retry or a block instead of a completion. Leave it out for a runner
+  #   # with no result protocol; its report then says no file was written.
   #   # A live session (ADR 0032): a person's message reaches the run while it
   #   # works, in the same process. claude and codex runs get oguri's tools
   #   # (progress, ask, handback) unless the runner sets oguriTools: false.
@@ -923,6 +1216,23 @@ worker:
   # worker completed a task, it stops doing that; 0 turns it off for
   # completed tasks.
   followupDays: 14
+  #
+  # Runner tiers, cheapest first (ADR 0034). The superagents pick one per
+  # worker by difficulty and write 'tier: <name>' on its task; a tier names
+  # only entries of 'runners' above, and its effort must be on their 'efforts'.
+  # tiers:
+  #   cheap: [fixer]
+  #   standard:
+  #     runners: [chat]
+  #     effort: medium
+  # A failed run of a tiered task moves it this many tiers up, at most, over
+  # its life. 0 (the default) never moves it.
+  # escalation:
+  #   maxSteps: 1
+  #
+  # How many parents a subtask created inside a run may have, 0 to 8 (ADR 0036).
+  # A run past it is told to hand the work back; 0 means runs create no subtasks.
+  maxTaskDepth: 2
 
 # --- notifications (ADR 0028) ---
 notifications:
@@ -965,9 +1275,9 @@ notifications:
 #   # answers when you talk to it ('oguri small <machine> "..."').
 #   small:
 #     enabled: true
-#     # big: liu-big            # the big superagent's agent id; its workers need no approval here
+#     # big: alice-big         # the big superagent's agent id; its workers need no approval here
 #     # talk: true
-#     # maxWorkers: 3         # how many workers it may run here at once (1 to 16)
+#     # maxWorkers: 3         # how many workers it may run here at once (1 to 20)
 #     # quietMinutes: 30
 #     # reportEveryMinutes: 60
 #

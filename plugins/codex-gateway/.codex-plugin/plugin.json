@@ -1,6 +1,6 @@
 {
   "name": "oguri-gateway",
-  "version": "1.0.1",
+  "version": "1.0.5",
   "description": "Connect Codex to a local oguri relay gateway through its portable request and reply queues.",
   "author": {
     "name": "Alexander",

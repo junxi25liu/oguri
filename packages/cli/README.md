@@ -68,7 +68,7 @@ its machine allows.
     </td>
     <td valign="top">
       <h4>Pick the brain per job</h4>
-      Opus to plan, DeepSeek to type. One <code>model:</code> line per runner, Claude Code or Codex.
+      A strong model to plan, a cheap one to type. One <code>model:</code> line per runner, Claude Code or Codex.
     </td>
   </tr>
   <tr>
@@ -91,6 +91,8 @@ npm i -g oguri
 
 You need Node 24 or later and Git 2.42 or later. The package is one self-contained file with no
 dependencies. To build from source instead, see [Install without npm](#install-without-npm).
+Setting up a new machine from scratch, including a second one? Follow the
+[deployment guide](https://github.com/junxi25liu/oguri/blob/main/docs/deploy.md).
 
 ## Five minutes, one machine
 
@@ -98,7 +100,7 @@ dependencies. To build from source instead, see [Install without npm](#install-w
 It carries messages, never your code.
 
 ```console
-oguri init --repo git@github.com:acme/oguri-transport.git --agent liu-mac
+oguri init --repo git@github.com:acme/oguri-transport.git --agent alice-mac
 oguri daemon start
 ```
 
@@ -125,7 +127,9 @@ superagent:
 ```
 
 Want a live worker you can interrupt, Codex, or a cheaper model? `oguri runner presets` prints
-ready-made runner blocks to paste.
+ready-made runner blocks to paste. Model names in the presets are placeholders: use the models
+your own provider serves. To run cheap models first and climb to stronger ones when a run fails,
+group runners with `worker.tiers` ([details](https://github.com/junxi25liu/oguri/blob/main/docs/deploy.md#44-tiers-cheap-first-climb-on-failure)).
 
 **3. Start it and talk.**
 
@@ -137,7 +141,7 @@ oguri web                                    # the same, as a page on http://127
 ```
 
 `oguri doctor` checks the whole setup: Git, the daemon, each runner's command, and the superagent
-sessions.
+sessions. A run may take 180 minutes by default (`worker.timeoutMinutes`, 1 to 1440).
 
 ## Add a second machine
 
@@ -156,7 +160,7 @@ worker:
   runners:
     claude: { argv: [claude, -p, --output-format, json], session: claude-json, worktree: true }
 superagent:
-  small: { enabled: true, big: liu-mac } # the big superagent's agent id
+  small: { enabled: true, big: alice-mac } # the big superagent's agent id
 ```
 
 ```console
@@ -235,7 +239,8 @@ The on-disk format is an open [protocol specification](https://github.com/junxi2
   listed chats. Everyone else's messages are context, never commands.
 - **Workers are boxed in.** Runners are argv lists with no shell. Each run has a concurrency cap,
   an hourly cap, and a timeout that stops its whole process group. A worker cannot ask Big for more
-  workers or rewrite its agent's profile.
+  workers or rewrite its agent's profile, and it can write only to its own task. With runner grants
+  on, a runner starts only after a person at that machine's terminal has granted it.
 - **Secrets stay out of history.** Messages, run summaries, pushes, and chat replies pass a secret
   scanner. Printed policies and statuses redact credentials.
 
@@ -258,13 +263,14 @@ ssh gpu-box ./install.sh --from-binary /tmp/oguri
 
 ## Documentation
 
-| Read                                                | For                                                   |
-| --------------------------------------------------- | ----------------------------------------------------- |
-| [User guide](https://github.com/junxi25liu/oguri/blob/main/docs/guide.md)                         | Every feature, with working commands                  |
-| [Quickstart](https://github.com/junxi25liu/oguri/blob/main/docs/quickstart.md)                    | Transport choices, editor setup, FAQ, troubleshooting |
-| [Protocol specification](https://github.com/junxi25liu/oguri/blob/main/spec/oguri-protocol-v1.md) | The on-disk format other implementations can follow   |
+| Read                                                | For                                                                                  |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| [Deployment guide](https://github.com/junxi25liu/oguri/blob/main/docs/deploy.md)                  | A new machine from zero: install, policy, a second machine, upgrade, troubleshooting |
+| [User guide](https://github.com/junxi25liu/oguri/blob/main/docs/guide.md)                         | Every feature, with working commands                                                 |
+| [Quickstart](https://github.com/junxi25liu/oguri/blob/main/docs/quickstart.md)                    | Transport choices, editor setup, FAQ, troubleshooting                                |
+| [Protocol specification](https://github.com/junxi25liu/oguri/blob/main/spec/oguri-protocol-v1.md) | The on-disk format other implementations can follow                                  |
 
-Chinese: [README](https://github.com/junxi25liu/oguri/blob/main/README.zh-CN.md), [用户指南](https://github.com/junxi25liu/oguri/blob/main/docs/zh-CN/guide.md), [快速上手](https://github.com/junxi25liu/oguri/blob/main/docs/zh-CN/quickstart.md).
+Chinese: [README](https://github.com/junxi25liu/oguri/blob/main/README.zh-CN.md), [部署指南](https://github.com/junxi25liu/oguri/blob/main/docs/zh-CN/deploy.md), [用户指南](https://github.com/junxi25liu/oguri/blob/main/docs/zh-CN/guide.md), [快速上手](https://github.com/junxi25liu/oguri/blob/main/docs/zh-CN/quickstart.md).
 
 ## Development
 

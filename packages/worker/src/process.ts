@@ -28,6 +28,9 @@ export function pidExists(pid: number): boolean {
 
 /** When a process started, or null when this platform cannot say. */
 export async function processStartTime(pid: number): Promise<number | null> {
+  // Our own uptime is known even when a sandbox denies external process inspection.
+  // Do not infer the start time of any other process when inspection is unavailable.
+  if (pid === process.pid) return Date.now() - process.uptime() * 1_000;
   try {
     const { stdout } = await exec("ps", ["-o", "lstart=", "-p", String(pid)], {
       env: { ...process.env, LC_ALL: "C", LANG: "C" },

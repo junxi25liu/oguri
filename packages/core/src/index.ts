@@ -44,6 +44,7 @@ export {
   SESSION_TOKEN,
   DEFAULT_WORKER_POLICY,
   approvalRequired,
+  effectiveConcurrency,
   isApprovalMode,
   loadLocalPolicy,
   originOf,
@@ -60,6 +61,8 @@ export type {
   WorkerPolicy,
   WorkerRunner,
   WorkerRetryPolicy,
+  WorkerTier,
+  WorkerEscalationPolicy,
   SessionMode,
   AbandonAction,
   RetryAction,
@@ -86,6 +89,30 @@ export type {
 
 export { APPROVAL_KINDS, ApprovalStore } from "./approvals.ts";
 export type { ApprovalKind, ApprovalRecord } from "./approvals.ts";
+
+export {
+  AUDIT_ACTIONS,
+  GRANTS_FILE,
+  RUNNER_AUDIT_FILE,
+  RUNNER_REQUESTS_FILE,
+  RunnerGrantStore,
+  checkGrant,
+  decodeGrants,
+  grantRefusal,
+  grantRows,
+  runnerDigest,
+  shortDigest,
+} from "./runner-grants.ts";
+export type {
+  AuditAction,
+  AuditEntry,
+  GrantActor,
+  GrantState,
+  GrantVerdict,
+  RunnerGrant,
+  RunnerGrantRow,
+  RunnerRequest,
+} from "./runner-grants.ts";
 
 export { currentHolder, reduceClaims } from "./room/claims.ts";
 export type { ClaimStatus } from "./room/claims.ts";
@@ -178,7 +205,34 @@ export type { InboxItem, InboxQuery } from "./state.ts";
 export { FileLock } from "./lock.ts";
 export type { LockOptions } from "./lock.ts";
 
-export { MODEL_NAME, runnerFlavor, withRunnerModel } from "./runner-model.ts";
+export {
+  EFFORT_NAME,
+  MODEL_NAME,
+  runnerFlavor,
+  withRunnerEffort,
+  withRunnerModel,
+  effortConflict,
+} from "./runner-model.ts";
+
+export {
+  TIER_REASON_LIMIT,
+  allowListGate,
+  escalationFor,
+  findTier,
+  nextTier,
+  parseTaskHeader,
+  renderTaskHeader,
+  resolveTier,
+  runnerAvailability,
+  tierOfRunner,
+} from "./tiers.ts";
+export type {
+  Escalation,
+  ParsedTaskHeader,
+  ResolvedTier,
+  RunnerGate,
+  TaskHeader,
+} from "./tiers.ts";
 
 export {
   createRoomConfig,
@@ -290,6 +344,7 @@ export type { FeishuIntakePolicy, IntakeChat, IntakePolicy } from "./intake-poli
 export {
   DEFAULT_SUPERAGENT_POLICY,
   DEFAULT_SUPERAGENT_ROOM,
+  MAX_RUN_CONCURRENCY,
   parseSuperagentPolicy,
 } from "./superagent-policy.ts";
 export type {

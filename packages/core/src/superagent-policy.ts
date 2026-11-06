@@ -56,6 +56,16 @@ export interface SuperagentPolicy {
 
 export const DEFAULT_SUPERAGENT_ROOM = "superagent";
 
+/**
+ * The most runs one machine may supervise at once.
+ *
+ * It is one number for both places that can set the limit — `worker.concurrency`
+ * and `superagent.small.maxWorkers` — because a small superagent replaces the
+ * former with the latter. Two different ceilings would make the effective value
+ * depend on which section a person happened to edit.
+ */
+export const MAX_RUN_CONCURRENCY = 20;
+
 export const DEFAULT_SUPERAGENT_POLICY: SuperagentPolicy = {
   big: {
     enabled: false,
@@ -193,7 +203,7 @@ function parseSmall(value: unknown, source: string): SmallSuperagentPolicy {
     maxWorkers: integer(
       entry["maxWorkers"],
       defaults.maxWorkers,
-      [1, 16],
+      [1, MAX_RUN_CONCURRENCY],
       `${at}.maxWorkers`,
       source,
     ),

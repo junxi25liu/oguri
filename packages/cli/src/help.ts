@@ -65,7 +65,9 @@ TASKS
                                dependsOn,requires,target,maxAttempts]) without calling a model
   task claim <room> <id> <text> publish that this agent accepts the task
   task update <room> <id> <action> <text>
-                               refine or advance a guarded task lifecycle
+                               refine or advance a guarded task lifecycle; 'relinked' with
+                               --add-depends-on/--remove-depends-on edits an unclaimed task's
+                               dependencies (creator only)
   task list <room>             assignment, state, health, readiness, subtasks, conflicts
   task show <room> <id>        one task in full — definition, graph, every event, evidence,
                                and the chat origin and mandate when it has them
@@ -94,8 +96,14 @@ POLICY (machine-local, never published)
                                print how to give a run oguri's tools (never edits policy)
   runner presets               print runner blocks to paste into policy.yaml: a live
                                claude session, claude-json, codex exec, a cheap
-                               deepseek-v4.1-flash session, and the superagent's
-                               no-tool brain (--json; never edits policy)
+                               session with a placeholder model name, and the
+                               superagent's no-tool brain (--json; never edits policy)
+  runner list                  each runner, whether it is granted, and what agents asked for
+  runner grant <name>          let the worker start this runner, bound to its argv as it is
+                               now (--for <agent>, --expires 12h|7d; a person at a terminal)
+  runner revoke <name>         withdraw a grant; refused from the next pass, no restart
+  runner request <name> "<why>"
+                               ask this machine's person for a runner (--task <id>)
   worker install               start the worker at login (launchd / systemd --user)
   worker uninstall             remove the worker's login service
   big "<message>"              talk to the big superagent: it deploys workers on your
@@ -103,6 +111,9 @@ POLICY (machine-local, never published)
                                answers (--detach, --wait <s>; needs superagent start somewhere)
   small <agent|machine:id> "<message>"
                                talk to one machine's small superagent directly
+  chat [--target big|<agent>|machine:<id>] [--thread <id>]
+                               an interactive terminal conversation; /target switches
+                               superagent, /history re-reads, /exit leaves only this terminal
   superagent start [--once]    run this machine's superagent roles: the big one, and the
                                small one with its workers (needs superagent.*.enabled)
   superagent status            roles on this machine, workers followed and running,
@@ -162,8 +173,8 @@ DAEMON
 
 DASHBOARD
   web [--port 7380] [--host 127.0.0.1]
-                               read-only local dashboard: what needs you, machines,
-                               agents, tasks by state, needs-human items, local runs
+                               read-only local dashboard; /chat is the separate
+                               conversation page: /chat?target=big or target=machine:<id>
   web --host <ip> --allow-remote [--token <t>]
                                serve beyond loopback; requests need the bearer
                                token, generated and printed when not given
@@ -181,11 +192,13 @@ OPTIONS
   --reply-to <message-id>      thread this under an existing message
   --scope <path>               repository-review scope (repeatable)
   --ref <repo@rev:path>        repository-review code reference (repeatable)
-  --target <agent>             task target — an agent id or machine:<id>;
-                               omit on create for free-to-claim
+  --target <agent>             task target, or 'chat' target: big, an agent id,
+                               or machine:<id>; omit on task create for free-to-claim
   --free                       retarget an open task to any room agent
   --stale-after <seconds>      no-event interval before a task is stale (min 60)
   --depends-on <task-id>       task create: claim only after that task completes (repeatable)
+  --add-depends-on <task-id>   task update <id> relinked: add a dependency to an unclaimed task (repeatable)
+  --remove-depends-on <task-id> task update <id> relinked: drop a dependency (repeatable)
   --parent <task-id>           task create: make it a subtask of that task
   --requires <capability>      task create: only agents declaring it may claim (repeatable)
   --max-attempts <n>           task create: accept at most n claims (1-20)

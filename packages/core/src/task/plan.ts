@@ -372,6 +372,8 @@ export interface CreatedPlan {
   parent: { id: string; title: string };
   /** False when the claim on the parent was refused, e.g. by an approval rule. */
   parentClaimed: boolean;
+  /** True when `parent` already existed: a run's own task, which this plan splits (ADR 0036). */
+  attached?: boolean;
   /** Why the parent claim was refused. */
   claimError?: string;
   /** In creation order, which is dependency order. */
@@ -387,7 +389,7 @@ export class PlanCreateError extends Error {
     const done =
       created === null
         ? "nothing was created"
-        : `created parent ${created.parent.id} and ${String(created.tasks.length)} subtask(s): ${
+        : `created ${created.attached === true ? `under ${created.parent.id}` : `parent ${created.parent.id} and`} ${String(created.tasks.length)} subtask(s): ${
             created.tasks.map((task) => `${task.key}=${task.id}`).join(", ") || "none"
           }`;
     super(`plan creation stopped: ${describeError(cause)} (${done})`, { cause });
@@ -404,12 +406,16 @@ export class PlanCreateError extends Error {
  * each `dependsOn` names tasks that already exist, which `task create`
  * requires. A refused parent claim does not stop the steps: they are the work,
  * and the parent can be claimed later.
+ *
+ * With `options.parent` the steps go under that task and no new parent is
+ * written. That is a worker's run splitting its own task: the run's task is
+ * already the goal and already has an owner, and the roll-up closes it.
  */
 export async function createPlanTasks(
   writer: PlanWriter,
   room: string,
   plan: Plan,
-  options: { goal?: string } = {},
+  options: { goal?: string; parent?: string } = {},
 ): Promise<CreatedPlan> {
   const trimmed = options.goal?.trim() ?? "";
   const goal = trimmed.length > 0 ? trimmed : plan.title;
@@ -419,23 +425,34 @@ export async function createPlanTasks(
 
   let created: CreatedPlan | null = null;
   try {
-    const parentMessage = await writer.createTask(room, {
-      title: plan.title,
-      definition: `${goal}\n\nPlanned as ${String(ordered.length)} subtask(s) with oguri plan.`,
-    });
-    const parentId = parentMessage.header.task?.id;
-    if (parentId === undefined) throw new Error("the parent task was created without an id");
-    created = {
-      room,
-      parent: { id: parentId, title: plan.title },
-      parentClaimed: false,
-      tasks: [],
-    };
-    try {
-      await writer.claimTask(room, parentId, "Planner: owns this goal while its subtasks run.");
-      created.parentClaimed = true;
-    } catch (error) {
-      created.claimError = describeError(error);
+    let parentId = options.parent;
+    if (parentId !== undefined) {
+      created = {
+        room,
+        parent: { id: parentId, title: plan.title },
+        parentClaimed: true,
+        attached: true,
+        tasks: [],
+      };
+    } else {
+      const parentMessage = await writer.createTask(room, {
+        title: plan.title,
+        definition: `${goal}\n\nPlanned as ${String(ordered.length)} subtask(s) with oguri plan.`,
+      });
+      parentId = parentMessage.header.task?.id;
+      if (parentId === undefined) throw new Error("the parent task was created without an id");
+      created = {
+        room,
+        parent: { id: parentId, title: plan.title },
+        parentClaimed: false,
+        tasks: [],
+      };
+      try {
+        await writer.claimTask(room, parentId, "Planner: owns this goal while its subtasks run.");
+        created.parentClaimed = true;
+      } catch (error) {
+        created.claimError = describeError(error);
+      }
     }
 
     const ids = new Map<string, string>();

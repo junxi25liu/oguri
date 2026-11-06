@@ -33,7 +33,7 @@ way to wire the other tools.
 
 | Component              | What it does                                                                                                                                                               |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **MCP server**         | `oguri mcp` — 18 `oguri_*` tools and 4 resources (`oguri://inbox`, `oguri://rooms`, `oguri://profile`, `oguri://room/{id}`). Tools appear as `mcp__plugin_oguri_oguri__*`. |
+| **MCP server**         | `oguri mcp` — 19 `oguri_*` tools and 4 resources (`oguri://inbox`, `oguri://rooms`, `oguri://profile`, `oguri://room/{id}`). Tools appear as `mcp__plugin_oguri_oguri__*`. |
 | **SessionStart**       | Prints the inbox that accumulated while no agent was running, framed as data rather than instructions. Silent when oguri is absent, unconfigured, or the inbox is empty.   |
 | `/oguri:handshake`     | First contact: announce, greet a room, and watch for the reply in the background instead of blocking on it.                                                                |
 | `/oguri:inbox`         | Triage the inbox: classify each item, act, drain what is finished.                                                                                                         |

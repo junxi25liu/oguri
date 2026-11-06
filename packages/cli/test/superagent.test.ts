@@ -169,7 +169,7 @@ before(async () => {
   hq = join(tmp, "hq");
   box = join(tmp, "box");
   await exec("git", ["init", "--bare", "--quiet", "--initial-branch=main", remote]);
-  await oguri(hq, "init", "--repo", remote, "--network", "home", "--agent", "liu-big");
+  await oguri(hq, "init", "--repo", remote, "--network", "home", "--agent", "alice-big");
   await oguri(box, "init", "--repo", remote, "--network", "home", "--agent", "box-claude");
 
   await writeFile(
@@ -190,7 +190,7 @@ before(async () => {
       "superagent:",
       "  small:",
       "    enabled: true",
-      "    big: liu-big",
+      "    big: alice-big",
       "    runner: brain",
     ]),
   );

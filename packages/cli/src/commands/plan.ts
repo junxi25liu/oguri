@@ -222,8 +222,11 @@ export async function cmdPlan(ctx: Ctx): Promise<number> {
     }
 
     try {
+      // Inside a worker's run the steps go under its own task, as over MCP (ADR 0036).
+      await backend.runScope?.assertCreate(room, undefined);
       const created = await createPlanTasks(backendWriter(backend), room, plan, {
         goal: effectiveGoal,
+        ...(backend.runScope === undefined ? {} : { parent: backend.runScope.taskId }),
       });
       if (asJson) {
         json(created);

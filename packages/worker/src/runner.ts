@@ -8,12 +8,22 @@
  * runners, and servers of its own; signalling only the direct child would leave
  * those running, holding the output pipes open and the machine busy. Every
  * kill — timeout, cancellation, a forced stop — goes to the whole group.
+ *
+ * A run owns what it started. Once the executor itself has exited, whatever it
+ * left in its group gets `DRAIN_LIMIT_MS` to finish, then SIGTERM, then SIGKILL;
+ * and when the run ends the group is signalled once more, so a background job
+ * that let go of the pipes does not outlive the run either. The timeout judges
+ * the executor alone: a background job holding stdout open is not a run that
+ * failed to finish. There is no way to keep a background service past its run.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { promisify } from "node:util";
+
+const exec = promisify(execFile);
 
 export interface RunRequest {
   argv: readonly string[];
@@ -52,6 +62,19 @@ export interface RunResult {
   /** The run was stopped through `RunRequest.signal`. */
   aborted?: boolean;
   durationMs: number;
+  /**
+   * How many processes the executor left running in its group when the run
+   * ended, which the runner then stopped. Zero when nothing was left; one when
+   * the process table cannot be read but the group was still there.
+   */
+  reapedBackground?: number;
+  /**
+   * A live session only: how many of the messages written to stdin (the prompt
+   * is the first) the session is known to have read. With the echo on that is
+   * the echoes seen; without it, the results seen, one per message. A message
+   * past this count may never have been read, so it is not consumed.
+   */
+  messagesRead?: number;
   /** The end of stdout, which is where agents put their final answer. */
   stdoutTail: string;
   /** Set when the process could not be started at all. */
@@ -63,6 +86,42 @@ export type Executor = (request: RunRequest) => Promise<RunResult>;
 const TAIL_BYTES = 64 * 1024;
 /** Grace between SIGTERM and SIGKILL, so an agent can flush what it has. */
 const KILL_GRACE_MS = 5_000;
+/** How long what an executor left running may go on once the executor has exited. */
+export const DRAIN_LIMIT_MS = 10_000;
+
+/**
+ * Live processes in a group other than its leader. Zero when the group is gone,
+ * and one when it exists but the process table cannot be read (a sandbox may
+ * deny `ps`), so "something was there" is never reported as "nothing".
+ */
+function groupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    // EPERM: a group exists, it just is not ours to signal.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function groupMembers(pgid: number): Promise<number> {
+  if (!groupAlive(pgid)) return 0;
+  try {
+    const { stdout } = await exec("ps", ["-A", "-o", "pgid=,pid=,stat="], {
+      env: { ...process.env, LC_ALL: "C", LANG: "C" },
+    });
+    let count = 0;
+    for (const line of stdout.split("\n")) {
+      const [group, pid, stat] = line.trim().split(/\s+/);
+      if (group === String(pgid) && pid !== String(pgid) && !(stat ?? "").startsWith("Z")) {
+        count += 1;
+      }
+    }
+    return count;
+  } catch {
+    return 1;
+  }
+}
 
 /**
  * Signal a whole process group, falling back to the one process.
@@ -98,7 +157,18 @@ export const runExecutor: Executor = async (request) => {
     let timedOut = false;
     let aborted = false;
     let settled = false;
+    let settling = false;
+    /** Processes still running when the drain limit ran out. */
+    let drained = 0;
+    let exited = false;
+    let exitCode: number | null = null;
+    let exitSignal: NodeJS.Signals | null = null;
     let killTimer: NodeJS.Timeout | undefined;
+    let drainTimer: NodeJS.Timeout | undefined;
+    let giveUpTimer: NodeJS.Timeout | undefined;
+    /** Live session: messages written to stdin, and how many the session is known to have read. */
+    let written = 0;
+    let read = 0;
 
     const child = spawn(command, args, {
       cwd: request.cwd,
@@ -121,23 +191,50 @@ export const runExecutor: Executor = async (request) => {
       stop();
     };
 
-    const finish = (result: Omit<RunResult, "durationMs" | "stdoutTail" | "aborted">): void => {
+    /**
+     * The run is over: stop whatever is still in the executor's group and wait
+     * for it to go. Done before the run resolves, never on a timer that could
+     * outlive it, because a group id that has emptied can be handed to an
+     * unrelated process.
+     */
+    const reap = async (): Promise<number> => {
+      const pid = child.pid;
+      if (pid === undefined) return 0;
+      const members = await groupMembers(pid);
+      if (members === 0) return 0;
+      killGroup(pid, "SIGTERM", child);
+      const deadline = Date.now() + KILL_GRACE_MS;
+      while (Date.now() < deadline && groupAlive(pid)) {
+        await new Promise((wake) => setTimeout(wake, 50));
+      }
+      if (groupAlive(pid)) killGroup(pid, "SIGKILL", child);
+      return members;
+    };
+
+    const finish = (
+      result: Omit<RunResult, "durationMs" | "stdoutTail" | "aborted" | "messagesRead">,
+    ): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (killTimer !== undefined) clearTimeout(killTimer);
+      if (drainTimer !== undefined) clearTimeout(drainTimer);
+      if (giveUpTimer !== undefined) clearTimeout(giveUpTimer);
       request.signal?.removeEventListener("abort", onAbort);
       stdoutLog.end();
       stderrLog.end();
       resolve({
         ...result,
         ...(aborted ? { aborted } : {}),
+        ...(request.live === undefined ? {} : { messagesRead: read }),
         durationMs: Date.now() - started,
         stdoutTail: tail.toString("utf8"),
       });
     };
 
     const timer = setTimeout(() => {
+      // The limit is the executor's. One that already exited met it.
+      if (exited) return;
       timedOut = true;
       stop();
     }, request.timeoutMs);
@@ -155,8 +252,38 @@ export const runExecutor: Executor = async (request) => {
     child.on("error", (error) => {
       finish({ exitCode: null, signal: null, timedOut, error: error.message });
     });
+    // The executor is done when it exits, not when its pipes close: a
+    // background job that inherited them keeps `close` away indefinitely.
+    child.on("exit", (code, signal) => {
+      exited = true;
+      exitCode = code;
+      exitSignal = signal;
+      clearTimeout(timer);
+      drainTimer = setTimeout(() => {
+        const pid = child.pid;
+        void (pid === undefined ? Promise.resolve(0) : groupMembers(pid)).then((left) => {
+          drained = left;
+          stop();
+          // A pipe held by something outside the group would never close.
+          giveUpTimer = setTimeout(settle, KILL_GRACE_MS + 1_000);
+        });
+      }, DRAIN_LIMIT_MS);
+    });
+    const settle = (): void => {
+      if (settled || settling) return;
+      settling = true;
+      void reap()
+        .then((reapedBackground) => Math.max(reapedBackground, drained))
+        .then((reapedBackground) =>
+          finish({ exitCode, signal: exitSignal, timedOut, reapedBackground }),
+        );
+    };
     child.on("close", (code, signal) => {
-      finish({ exitCode: code, signal, timedOut });
+      if (!exited) {
+        exitCode = code;
+        exitSignal = signal;
+      }
+      settle();
     });
 
     // An executor that ignores stdin closes the pipe early; that is its choice,
@@ -168,7 +295,6 @@ export const runExecutor: Executor = async (request) => {
     }
 
     // A live session: one user message per turn, written as it arrives.
-    let written = 0;
     let results = 0;
     let replayed = 0;
     /** A result arrived after the last echo: everything echoed is answered. */
@@ -197,11 +323,13 @@ export const runExecutor: Executor = async (request) => {
         pending = pending.slice(newline + 1);
         if (isResultLine(line)) {
           results += 1;
+          if (!replay) read = results;
           answered = true;
           // A message written during this turn has a turn of its own coming.
           closeIfDone();
         } else if (replay && isReplayLine(line)) {
           replayed += 1;
+          read = replayed;
           answered = false;
         }
         newline = pending.indexOf("\n");

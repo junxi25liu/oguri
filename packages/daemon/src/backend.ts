@@ -10,3 +10,13 @@
 export { openBackend } from "./backend/open.ts";
 export type { OpenBackendOptions } from "./backend/open.ts";
 export type { Backend, NetworkSummary } from "./backend/types.ts";
+export {
+  MAX_PARENT_HOPS,
+  RunScope,
+  RunScopeError,
+  RunScopedBackend,
+  isDescendant,
+  runOf,
+  scopeToRun,
+  taskDepth,
+} from "./backend/run-scope.ts";

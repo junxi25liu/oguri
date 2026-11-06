@@ -6,7 +6,14 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { after, before, describe, it } from "node:test";
 
-import { createMessage, createTask, ulid, type Message, type Task } from "@oguri/protocol";
+import {
+  createMessage,
+  createTask,
+  ulid,
+  type Message,
+  type Priority,
+  type Task,
+} from "@oguri/protocol";
 
 import { defaultIdentity } from "../src/config.ts";
 import { Layout } from "../src/layout.ts";
@@ -19,7 +26,14 @@ const exec = promisify(execFile);
 function taskEvent(
   from: string,
   task: Task,
-  options: { inReplyTo?: string; thread?: string; body?: string; ts?: string } = {},
+  options: {
+    inReplyTo?: string;
+    thread?: string;
+    body?: string;
+    ts?: string;
+    /** The priority on this message's header; the task carries none of its own. */
+    priority?: Priority;
+  } = {},
 ): Message {
   const id = ulid();
   return createMessage({
@@ -36,6 +50,7 @@ function taskEvent(
     thread: options.thread ?? id,
     ...(options.inReplyTo === undefined ? {} : { inReplyTo: options.inReplyTo }),
     ...(options.ts === undefined ? {} : { ts: options.ts }),
+    ...(options.priority === undefined ? {} : { priority: options.priority }),
     body: options.body ?? `${task.action}\n`,
     task,
   });
@@ -108,6 +123,39 @@ describe("task event reduction", () => {
       status?.invalidEvents.map((event) => event.messageId),
       [losing.header.id],
     );
+  });
+
+  it("reports the priority its creator gave it, whatever later events carry", () => {
+    // The priority belongs to the task's creation. A later event's priority is
+    // the priority of that message — a completion note is not urgent — so the
+    // reducer must not let it rewrite the work's own priority (ADR 0035).
+    const open = createTask({ id: ulid(), creator: "alice-codex", title: "Fix the build" });
+    const root = taskEvent("alice-codex", open, { priority: "high" });
+    const claimed = {
+      ...open,
+      action: "claimed" as const,
+      state: "claimed" as const,
+      assignee: "bob-codex",
+    };
+    const claim = taskEvent("bob-codex", claimed, {
+      inReplyTo: root.header.id,
+      thread: root.header.thread,
+      priority: "low",
+    });
+    const released = { ...open, action: "released" as const, state: "open" as const };
+    const release = taskEvent("bob-codex", released, {
+      inReplyTo: claim.header.id,
+      thread: root.header.thread,
+      priority: "low",
+    });
+
+    const [status] = reduceTasks([root, claim, release]);
+    assert.equal(status?.priority, "high");
+    assert.equal(status?.task.state, "open");
+
+    // A task created without a priority is `normal`, like every other message.
+    const plain = createTask({ id: ulid(), creator: "alice-codex", title: "Plain" });
+    assert.equal(reduceTasks([taskEvent("alice-codex", plain)])[0]?.priority, "normal");
   });
 
   it("protects an active task from sealing even when its claim needs no reply", () => {

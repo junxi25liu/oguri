@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -337,5 +337,86 @@ describe("oguri worker, after a crash", () => {
     );
     assert.equal(status.service.installed, false);
     assert.match((await bob("worker", "status")).stdout, /start at login/);
+  });
+
+  it("reports the concurrency the engine applies, and accepts 20", async () => {
+    await setBobPolicy([], 20);
+    const parsed = parseJson<{ concurrency: number; worker: { concurrency: number } }>(
+      await bob("worker", "status", "--json"),
+    );
+    assert.equal(parsed.worker.concurrency, 20, "the policy parsed 20, not the old ceiling");
+    assert.equal(parsed.concurrency, 20);
+    assert.match((await bob("worker", "status")).stdout, /concurrency\s+20/);
+
+    // A small superagent replaces it, and status says which number is in force.
+    await writeFile(
+      join(bobHome, "policy.yaml"),
+      [
+        "v: 1",
+        "worker:",
+        "  enabled: true",
+        "  concurrency: 2",
+        "  runners:",
+        `    echo: ${JSON.stringify(ECHO_RUNNER)}`,
+        "superagent:",
+        "  small:",
+        "    enabled: true",
+        "    maxWorkers: 20",
+        "",
+      ].join("\n"),
+    );
+    const small = parseJson<{ concurrency: number; worker: { concurrency: number } }>(
+      await bob("worker", "status", "--json"),
+    );
+    assert.equal(small.worker.concurrency, 2, "the file still says 2");
+    assert.equal(small.concurrency, 20, "the small superagent's maxWorkers is what runs");
+  });
+
+  it("runs a task at an effort from the runner's allow-list", async () => {
+    // A real `claude`-named command that prints the argv it was given, so the
+    // assertion is about the command line a task can reach.
+    const argvRunner = join(tmp, "claude");
+    await writeFile(argvRunner, '#!/bin/sh\necho ARGV: "$@"\ncat >/dev/null\n', { mode: 0o755 });
+    await writeFile(
+      join(bobHome, "policy.yaml"),
+      [
+        "v: 1",
+        "worker:",
+        "  enabled: true",
+        "  concurrency: 1",
+        "  timeoutMinutes: 1",
+        `  workdir: ${JSON.stringify(tmp)}`,
+        "  runners:",
+        "    claude:",
+        `      argv: [${JSON.stringify(argvRunner)}, -p]`,
+        "      effort: medium",
+        "      efforts: [low, high]",
+        "  trustedRequesters: [alice-claude]",
+        "",
+      ].join("\n"),
+    );
+    const made = parseJson<{ task: { id: string } }>(
+      await alice(
+        "task",
+        "create",
+        "ops",
+        "effort: high\nSay hello.",
+        "--title",
+        "Effort run",
+        "--target",
+        "bob-claude",
+        "--json",
+      ),
+    );
+    const id = made.task.id;
+    assert.equal((await bob("worker", "start", "--once")).code, 0);
+    // The run's stdout is local; it shows the level the task picked, appended
+    // to the owner's argv, and nothing the task's own text could add.
+    const runs = await readdir(join(bobHome, "runs", id), { recursive: true });
+    const log = runs.find((name) => name.endsWith("stdout.log"));
+    assert.ok(log !== undefined, "the run wrote a log");
+    const written = await readFile(join(bobHome, "runs", id, log), "utf8");
+    assert.match(written, /ARGV: -p --effort high/);
+    assert.doesNotMatch(written, /Say hello|effort: high/);
   });
 });

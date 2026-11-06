@@ -1,9 +1,10 @@
-import { loadLocalPolicy } from "@oguri/core";
-import { Worker, listRuns } from "@oguri/worker";
+import { effectiveConcurrency, loadLocalPolicy } from "@oguri/core";
+import { Worker, listRuns, reportStuck } from "@oguri/worker";
 
 import { type Ctx, bool, num, usage } from "../context.ts";
 import { ago, bold, cyan, dim, green, json, out, red, yellow } from "../output.ts";
 import { withBackend } from "../with-backend.ts";
+import { modelEvidence } from "../model-evidence.ts";
 import { workerPolicyFor } from "./superagent.ts";
 import { cmdWorkerMcpConfig, mcpCommand } from "./worker-mcp-config.ts";
 import {
@@ -103,6 +104,12 @@ async function startWorker(ctx: Ctx): Promise<number> {
               `${yellow("recovered")} ${r.taskId}: abandoned run closed${r.published === null ? "" : `, task ${r.published}`}`,
             );
           }
+          for (const r of report.reported ?? []) {
+            if (r.result === "retrying") continue;
+            stamp(
+              `${yellow("reported")} ${r.taskId}: ${r.result === "published" ? "late report published" : "undelivered report closed"}${r.outcome === undefined ? "" : `, run ${r.outcome}`}`,
+            );
+          }
         } catch (error) {
           stamp(red(`pass failed: ${error instanceof Error ? error.message : String(error)}`));
         }
@@ -162,14 +169,29 @@ async function startWorker(ctx: Ctx): Promise<number> {
 async function workerStatus(ctx: Ctx): Promise<number> {
   const resolved = await loadLocalPolicy(ctx.layout);
   const worker = resolved.policy.worker;
+  // What this machine really runs: a small superagent's maxWorkers replaces
+  // worker.concurrency while that role is on. The engine reads the same value.
+  const concurrency = effectiveConcurrency(resolved.policy);
   const runs = await listRuns(ctx.layout.root, 50);
   const hourAgo = Date.now() - 60 * 60_000;
   const lastHour = runs.filter((run) => Date.parse(run.startedAt) > hourAgo).length;
   const running = runs.filter((run) => run.outcome === "running");
+  // Not limited to the newest runs: a stuck report is as old as its run.
+  const undelivered = (await listRuns(ctx.layout.root, Number.POSITIVE_INFINITY)).filter(
+    (run) => run.outcome === "unreported",
+  );
   const service = await workerServiceStatus(ctx.config.agent.id, ctx.layout);
 
   if (bool(ctx, "json")) {
-    json({ worker, sources: resolved.sources, runsLastHour: lastHour, running, service });
+    json({
+      worker,
+      concurrency,
+      sources: resolved.sources,
+      runsLastHour: lastHour,
+      running,
+      undelivered,
+      service,
+    });
     return 0;
   }
   out(bold("worker"));
@@ -189,7 +211,9 @@ async function workerStatus(ctx: Ctx): Promise<number> {
     `  runners         ${names.length === 0 ? dim("none") : names.map((n) => cyan(n) + traits(n)).join(", ")}`,
   );
   if (worker.defaultRunner !== undefined) out(`  defaultRunner   ${worker.defaultRunner}`);
-  out(`  concurrency     ${String(worker.concurrency)}`);
+  out(
+    `  concurrency     ${String(concurrency)}${concurrency === worker.concurrency ? "" : dim(` (superagent.small.maxWorkers; worker.concurrency is ${String(worker.concurrency)})`)}`,
+  );
   out(
     `  hourly budget   ${String(Math.max(0, worker.maxPerHour - lastHour))} of ${String(worker.maxPerHour)} left`,
   );
@@ -216,6 +240,19 @@ async function workerStatus(ctx: Ctx): Promise<number> {
     out();
     out(bold("running"));
     for (const run of running) out(`  ${run.taskId}  ${run.title}  ${dim(ago(run.startedAt))}`);
+  }
+  if (undelivered.length > 0) {
+    out();
+    out(bold("undelivered reports"));
+    for (const run of undelivered) {
+      const pending = run.pendingReport;
+      const line = `${run.taskId}  ${run.title}  ${
+        pending === undefined
+          ? "legacy record; will be reported on the next pass"
+          : `${String(pending.attempts)} failed attempt(s), next ${pending.nextAt}${pending.lastError === undefined ? "" : `: ${pending.lastError}`}`
+      }`;
+      out(`  ${reportStuck(run) ? red(line) : yellow(line)}`);
+    }
   }
   return 0;
 }
@@ -249,8 +286,11 @@ async function workerRuns(ctx: Ctx): Promise<number> {
         ? cyan(run.resumed === true ? " follow-up (resumed)" : " follow-up")
         : "";
     const session = run.sessionId === undefined ? "" : dim(` session ${run.sessionId.slice(0, 8)}`);
+    const model = dim(` model ${modelEvidence(run)}`);
+    const effort =
+      run.effortRequested === undefined ? "" : dim(` effort ${run.effortRequested} requested`);
     out(
-      `${outcome.padEnd(20)} ${run.taskId}  ${run.title}  ${dim(run.runner)}${exit}${followup}${session}${branch}  ${dim(ago(run.startedAt))}`,
+      `${outcome.padEnd(20)} ${run.taskId}  ${run.title}  ${dim(run.runner)}${model}${effort}${exit}${followup}${session}${branch}  ${dim(ago(run.startedAt))}`,
     );
   }
   return 0;

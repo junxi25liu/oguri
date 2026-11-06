@@ -16,7 +16,7 @@ describe("superagent thinker runner", () => {
       worker({
         brain: {
           argv: ["claude", "-p"],
-          model: "deepseek-v4.1-flash",
+          model: "my-cheap-model",
           resume: ["claude", "-p", "--resume", "{session}"],
           session: "claude-json",
           worktree: false,
@@ -24,37 +24,37 @@ describe("superagent thinker runner", () => {
       }),
       "brain",
     );
-    assert.deepEqual(thinker.argv, ["claude", "-p", "--model", "deepseek-v4.1-flash"]);
+    assert.deepEqual(thinker.argv, ["claude", "-p", "--model", "my-cheap-model"]);
     assert.deepEqual(thinker.resume, [
       "claude",
       "-p",
       "--resume",
       "{session}",
       "--model",
-      "deepseek-v4.1-flash",
+      "my-cheap-model",
     ]);
   });
 
   it("uses the codex flag and keeps a model the owner already chose", () => {
     const thinker = resolveThinker(
       worker({
-        brain: { argv: ["codex", "exec", "-"], model: "gpt-5-codex", worktree: false },
+        brain: { argv: ["codex", "exec", "-"], model: "example-codex-model", worktree: false },
         chosen: {
           argv: ["codex", "exec", "-m", "chosen-in-argv", "-"],
-          model: "gpt-5-codex",
+          model: "example-codex-model",
           worktree: false,
         },
       }),
       "brain",
     );
-    assert.deepEqual(thinker.argv, ["codex", "exec", "-", "-m", "gpt-5-codex"]);
+    assert.deepEqual(thinker.argv, ["codex", "exec", "-", "-m", "example-codex-model"]);
 
     const chosen = resolveThinker(
       worker({
-        brain: { argv: ["codex", "exec", "-"], model: "gpt-5-codex", worktree: false },
+        brain: { argv: ["codex", "exec", "-"], model: "example-codex-model", worktree: false },
         chosen: {
           argv: ["codex", "exec", "-m", "chosen-in-argv", "-"],
-          model: "gpt-5-codex",
+          model: "example-codex-model",
           worktree: false,
         },
       }),
@@ -71,7 +71,9 @@ describe("superagent thinker runner", () => {
     assert.deepEqual(plain.argv, ["claude", "-p"]);
 
     const other = resolveThinker(
-      worker({ brain: { argv: ["agent", "decide"], model: "gpt-5-codex", worktree: false } }),
+      worker({
+        brain: { argv: ["agent", "decide"], model: "example-codex-model", worktree: false },
+      }),
       "brain",
     );
     assert.deepEqual(other.argv, ["agent", "decide"]);

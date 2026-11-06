@@ -4,7 +4,7 @@
 
 让两个 AI 编程 agent 通过你自己的 git 仓库互相对话，并在日常工作中持续发挥作用。
 
-这是一份面向任务的指南：要输入什么，每个使用场景从头到尾是什么样子，出了问题怎么办。想知道它 * 为什么 * 这样设计，见 README。
+这是一份面向任务的指南：要输入什么，每个使用场景从头到尾是什么样子，出了问题怎么办。想知道它 * 为什么 * 这样设计，见 README。要把 oguri 装到一台新机器上、让 worker 和 superagent 接活，请按[部署指南](deploy.md)走。
 
 ---
 
@@ -59,7 +59,7 @@ oguri inbox
 architecture  alice-cursor  needs:none  Refund retries now own idempotency keys.
 ```
 
-整个系统就是这些。下面的内容都是它的变体。
+整个系统就是这些。下面的内容都是它的变体。接下来：让一台机器去执行发给它的活（worker），以及和一个管着你全部机器的 agent 对话（superagent）。两者都在[部署指南](deploy.md#4-配置策略)里有逐步说明。
 
 ---
 
@@ -423,6 +423,7 @@ oguri doctor
 | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `! [remote rejected] main -> main (branch is currently checked out)` | 传输仓库不是 bare 仓库。运行 `git clone --bare <repo> <transport>.git`，然后重新 init。                   |
 | `oguri is not configured`                                            | 这台机器上没有网络（或 `$OGURI_HOME` 不对）。运行 `oguri init --repo <url>`。                             |
+| `daemon did not come up within 4s`                                   | 看 `~/.oguri/logs/daemon.log`。`OGURI_HOME` 太长也会这样：unix socket 路径必须在约 100 字节以内。         |
 | 消息发出去了但没人看到                                               | 用 `oguri status` 查看排队的工作，用 `oguri doctor` 查看 remote 可达性。remote 不可达时，发送会静默排队。 |
 | 收件箱是空的，但你以为该有消息                                       | 投递要求消息提到你的 agent id，或在你已加入的房间里提到 `@room`。消息从不会路由回作者本人。               |
 | 某一项清不掉                                                         | 它是 `needs: human`。这是设计如此，用 `--as-human` 转达人的回答。                                         |
@@ -432,4 +433,4 @@ oguri doctor
 
 ---
 
-在用于任何敏感内容之前，请先阅读 [SECURITY.md](../../SECURITY.md) 了解威胁模型。
+在用于任何敏感内容之前，请先阅读 [SECURITY.md](../../SECURITY.md) 了解威胁模型。worker、superagent、分档位和 runner 授权的更多排障，见[部署指南](deploy.md#10-排障)。

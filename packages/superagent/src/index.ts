@@ -18,10 +18,18 @@ export {
   parseRouteDecision,
   unwrapEnvelope,
 } from "./decision.ts";
-export type { RouteDecision, RouteKind, RoutePlanStep, RouteScope } from "./decision.ts";
+export type {
+  RouteDecision,
+  RouteKind,
+  RoutePlanStep,
+  RouteScope,
+  RouteTier,
+  ScopeRunner,
+  ScopeTier,
+} from "./decision.ts";
 export { askModel, resolveThinker } from "./model.ts";
 export type { AskModel, ModelResult, RouterRunner } from "./model.ts";
-export { buildPrompt } from "./prompt.ts";
+export { TIER_RULES, buildPrompt } from "./prompt.ts";
 export type { PromptOptions, RouteRequest, SuperagentRole } from "./prompt.ts";
 export {
   BIG_KINDS,
@@ -36,6 +44,7 @@ export {
   act,
   decide,
   ensureRoom,
+  headerOf,
   readDetails,
   reply,
   superagentMandate,
@@ -53,9 +62,9 @@ export {
   workerRooms,
 } from "./big.ts";
 export type { BigOptions, BigReport } from "./big.ts";
-export { SmallSuperagent, attentionNote, isSmallRequest } from "./small.ts";
+export { SmallSuperagent, attentionNote, isSmallRequest, tierNote, tierProblem } from "./small.ts";
 export type { SmallOptions, SmallReport, SmallReportTask } from "./small.ts";
-export { loadSnapshot, renderSnapshot, scopeOf } from "./snapshot.ts";
+export { loadSnapshot, renderSnapshot, renderTiers, scopeOf, tierScope } from "./snapshot.ts";
 export type { Snapshot, SnapshotAgent, SnapshotMachine, SnapshotTask } from "./snapshot.ts";
 export { readSuperagentState, stateFile, writeSuperagentState } from "./state.ts";
 export type { SuperagentState, Tracked } from "./state.ts";

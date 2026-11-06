@@ -158,6 +158,24 @@ export async function daemonStatus(layout: Layout): Promise<DaemonStatus> {
 }
 
 /**
+ * The longest unix-socket path the kernel accepts: `sun_path` is 104 bytes on
+ * macOS and 108 on Linux, including the terminating NUL. Binding a longer path
+ * fails with EINVAL inside the daemon, which has no stdio, so the person saw
+ * only "did not come up".
+ */
+export const SOCKET_PATH_MAX_BYTES = process.platform === "darwin" ? 103 : 107;
+
+/** A message naming the real cause when the socket path cannot be bound, else null. */
+export function socketPathProblem(socketPath: string): string | null {
+  const bytes = Buffer.byteLength(socketPath);
+  if (bytes <= SOCKET_PATH_MAX_BYTES) return null;
+  return (
+    `the daemon socket path is ${String(bytes)} bytes, over this system's ${String(SOCKET_PATH_MAX_BYTES)}: ${socketPath}\n` +
+    `Use a shorter OGURI_HOME (for example OGURI_HOME=~/.oguri), then run 'oguri daemon start' again.`
+  );
+}
+
+/**
  * Start the daemon detached.
  *
  * Detached and with stdio ignored on purpose: the daemon must outlive the shell
@@ -167,6 +185,9 @@ export async function daemonStart(layout: Layout): Promise<{ started: boolean; m
   if (await DaemonClient.isAlive(layout.socketPath)) {
     return { started: false, message: "already running" };
   }
+
+  const tooLong = socketPathProblem(layout.socketPath);
+  if (tooLong !== null) return { started: false, message: tooLong };
 
   const { command, args } = await resolveDaemonEntry();
   const child = spawn(command, args, {

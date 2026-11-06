@@ -237,7 +237,7 @@ describe("MCP server", () => {
       const total = instructions.length + surface.length;
 
       assert.ok(
-        tools.length <= 18,
+        tools.length <= 19,
         `${String(tools.length)} tools: fold a new one into a neighbour, or raise this on purpose`,
       );
       assert.ok(
@@ -248,9 +248,10 @@ describe("MCP server", () => {
       // next genuinely new tool, tight enough that an added paragraph trips it.
       // The ceiling used to sit ~13% above the surface, until chat relay
       // actions (ADR 0030) and oguri_big (ADR 0031) spent that room. Raise it
-      // deliberately for a new tool, not to accommodate a rewording.
+      // deliberately for a new tool, not to accommodate a rewording. Raised
+      // for oguri_runner, the one way an agent asks for a runner grant.
       assert.ok(
-        total <= 25_500,
+        total <= 26_500,
         `the always-loaded surface is ${String(total)} chars (~${String(Math.round(total / 4))} tokens); trim a description or raise this deliberately`,
       );
     } finally {
@@ -336,6 +337,47 @@ describe("MCP server", () => {
     }
   });
 
+  it("lets an agent read runner grants and ask for one, but never grant", async () => {
+    const path = join(home, "policy.yaml");
+    await writeFile(
+      path,
+      ["v: 1", "worker:", "  runners:", '    cheap: { argv: ["claude", "-p"] }', ""].join("\n"),
+    );
+    try {
+      const listed = await client.callTool<{ enforced: boolean; runners: { runner: string }[] }>(
+        "oguri_runner",
+        { action: "list" },
+      );
+      assert.equal(listed.enforced, false);
+      assert.deepEqual(
+        listed.runners.map((row) => row.runner),
+        ["cheap"],
+      );
+      const asked = await client.callTool<{ granted: boolean; request: { by: string } }>(
+        "oguri_runner",
+        { action: "request", runner: "cheap", reason: "the dashboard task names runner: cheap" },
+      );
+      assert.equal(asked.granted, false);
+      assert.equal(asked.request.by, "mcp-agent");
+      // A request never creates the grants file, so enforcement stays off.
+      const after = await client.callTool<{ enforced: boolean }>("oguri_runner", {
+        action: "list",
+      });
+      assert.equal(after.enforced, false);
+      // There is no action that grants: the schema refuses one.
+      const refused = await client.rpc("tools/call", {
+        name: "oguri_runner",
+        arguments: { action: "grant", runner: "cheap" },
+      });
+      assert.ok(
+        refused.error !== undefined || refused.result?.["isError"] === true,
+        "oguri_runner accepted a grant",
+      );
+    } finally {
+      await rm(path, { force: true });
+    }
+  });
+
   it("writes nothing but JSON-RPC to stdout", async () => {
     await client.callTool("oguri_status");
     for (const line of client.stdoutLines) {
@@ -372,6 +414,7 @@ describe("MCP server", () => {
       "oguri_sync",
       "oguri_decide",
       "oguri_big",
+      "oguri_runner",
     ]) {
       assert.ok(names.includes(expected), `missing tool ${expected}`);
     }
@@ -403,6 +446,9 @@ describe("MCP server", () => {
       "oguri_approve",
       "oguri_task_approve",
       "oguri_policy_update",
+      // Granting a runner is the person's, at the terminal: oguri runner grant.
+      "oguri_runner_grant",
+      "oguri_runner_revoke",
       "oguri_room_create",
       "oguri_room_join",
       "oguri_room_leave",

@@ -2,6 +2,7 @@ import {
   MENTION_ROOM,
   assertDependenciesMet,
   assertInitialTask,
+  assertNoDependencyCycle,
   assertTaskTransition,
   compareMessages,
   hasTaskAttemptsLeft,
@@ -10,6 +11,7 @@ import {
   type AuthorKind,
   type Message,
   type Needs,
+  type Priority,
   type Task,
   type TaskAction,
   type TaskState,
@@ -43,6 +45,14 @@ export interface TaskStatus {
   definitionMessageId: string;
   thread: string;
   definition: string;
+  /**
+   * The priority its creator gave the task when it was created: the header of
+   * the `created` event's message. Nothing after creation changes it, because
+   * a later event's priority is the priority of that *message*, not of the
+   * work. It is exposed here so a worker can order the tasks it takes; the
+   * agenda's own ordering deliberately does not read it (ADR 0035).
+   */
+  priority: Priority;
   updatedAt: string;
   staleAt: string;
   stale: boolean;
@@ -142,7 +152,8 @@ function healthFor(task: Task, stale: boolean, waitingOn: readonly TaskLink[]): 
   if (task.state === "blocked") return "blocked";
   if (task.state === "stuck") return "stuck";
   // A cancelled dependency never completes by itself, so an open task behind
-  // one cannot move until its creator drops the dependency's work or reopens it.
+  // one cannot move until its creator drops the dependency (`relinked`),
+  // replaces it, or cancels the task.
   if (task.state === "open" && waitingOn.some((link) => link.state === "cancelled")) {
     return "blocked";
   }
@@ -244,6 +255,13 @@ function reduceRoom(messages: readonly Message[], now: number): Map<string, Redu
       if (next.action === "claimed") {
         assertDependenciesMet(reduction.task, (id) => reductions.get(id)?.task.state);
       }
+      if (next.action === "relinked") {
+        assertNoDependencyCycle(
+          next.id,
+          next.dependsOn ?? [],
+          (id) => reductions.get(id)?.task.dependsOn,
+        );
+      }
       reduction.task = withAttempt(next, nextTaskAttempt(reduction.task, next));
       reduction.current = event;
       reduction.accepted.push(event);
@@ -288,6 +306,7 @@ function reduceRoom(messages: readonly Message[], now: number): Map<string, Redu
         definitionMessageId: reduction.definitionMessageId,
         thread: reduction.root.header.thread,
         definition: reduction.definition,
+        priority: reduction.root.header.priority,
         updatedAt: current.header.ts,
         staleAt: new Date(staleAtMs).toISOString(),
         stale,

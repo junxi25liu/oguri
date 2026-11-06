@@ -1,6 +1,6 @@
 {
   "name": "@oguri/superagent",
-  "version": "1.0.1",
+  "version": "1.0.5",
   "description": "oguri superagent: the big superagent routes what people ask to the right machine, and a small superagent on each machine watches its work and reports back.",
   "license": "MIT",
   "type": "module",

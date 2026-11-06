@@ -1,6 +1,6 @@
 {
   "name": "@oguri/intake",
-  "version": "1.0.1",
+  "version": "1.0.5",
   "description": "oguri intake: turns a team chat's requests into tasks and sends acknowledgements, questions, and results back to the thread they came from.",
   "license": "MIT",
   "type": "module",

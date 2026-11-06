@@ -14,8 +14,10 @@
 
 import {
   describeError,
+  type RunnerGate,
   type SuperagentPolicy,
   type TaskDetail,
+  type TaskStatus,
   type WorkerPolicy,
 } from "@oguri/core";
 import type { Backend } from "@oguri/daemon";
@@ -28,6 +30,7 @@ import {
   COORDINATOR_KINDS,
   decide,
   ensureRoom,
+  escalationAttempts,
   FROM_SUPERAGENT_TAG,
   reply,
   SMALL_REPORT_TAG,
@@ -53,6 +56,8 @@ export interface BigOptions {
   home: string;
   loadPolicy: () => Promise<{ superagent: SuperagentPolicy; worker: WorkerPolicy }>;
   ask?: AskModel;
+  /** Which runners a worker may be deployed on beyond the allow-list (ADR 0034). */
+  gate?: RunnerGate;
   /** Runs the GitHub CLI; injectable, so tests need no `gh`. */
   gh?: GhRunner;
   now?: () => number;
@@ -86,6 +91,10 @@ const MAX_COORDINATION_PER_PASS = 3;
 const UNCLAIMED_MINUTES = 30;
 /** Workers are followed this long after they end, then forgotten. */
 const FOLLOW_DAYS = 7;
+/** Key prefix of a task stuck behind a cancelled dependency. */
+const STALLED_PREFIX = "stalled:";
+/** A stuck task is decided again after this long if it is still stuck. */
+const STALLED_RETRY_MS = 30 * 60_000;
 const CONTEXT_MESSAGES = 8;
 const TOLD_CHARS = 600;
 
@@ -293,6 +302,7 @@ export class BigSuperagent {
       ...(superagent.big.runner === undefined ? {} : { runner: superagent.big.runner }),
       ...(this.options.ask === undefined ? {} : { ask: this.options.ask }),
       ...(this.mind === undefined ? {} : { mind: this.mind }),
+      ...(this.options.gate === undefined ? {} : { gate: this.options.gate }),
       notices: state.notices,
       ...(signal === undefined ? {} : { signal }),
     });
@@ -326,7 +336,13 @@ export class BigSuperagent {
     this.log(`${conversation.messageId}: ${decision.kind} (${decision.reason})`);
     try {
       const acted = await act(
-        { backend, agentId, policy: superagent, log: this.log },
+        {
+          backend,
+          agentId,
+          policy: superagent,
+          ...attemptsOf(worker),
+          log: this.log,
+        },
         conversation,
         decision,
         workerRooms(superagent),
@@ -522,6 +538,7 @@ export class BigSuperagent {
       ...(superagent.big.runner === undefined ? {} : { runner: superagent.big.runner }),
       ...(this.options.ask === undefined ? {} : { ask: this.options.ask }),
       ...(this.mind === undefined ? {} : { mind: this.mind }),
+      ...(this.options.gate === undefined ? {} : { gate: this.options.gate }),
       ...(signal === undefined ? {} : { signal }),
     });
     let decision = decided.decision;
@@ -539,7 +556,13 @@ export class BigSuperagent {
     }
     try {
       const acted = await act(
-        { backend, agentId, policy: superagent, log: this.log },
+        {
+          backend,
+          agentId,
+          policy: superagent,
+          ...attemptsOf(worker),
+          log: this.log,
+        },
         conversation,
         decision,
         workerRooms(superagent),
@@ -557,6 +580,76 @@ export class BigSuperagent {
   }
 
   /**
+   * Open tasks that wait on a cancelled dependency, whoever created them.
+   *
+   * Such a task can never become claimable by waiting, so each one is a
+   * situation Big must act on: drop the dependency, rebuild the cancelled work,
+   * or stop the waiting task. The key names the cancelled set, so a task that
+   * is relinked onto a different cancelled one is a new situation.
+   */
+  private async stalledSituations(
+    superagent: SuperagentPolicy,
+  ): Promise<{ key: string; taskId: string; author: string; text: string }[]> {
+    const { backend, agentId } = this.options;
+    const found: { key: string; taskId: string; author: string; text: string }[] = [];
+    for (const room of workerRooms(superagent)) {
+      const statuses = await backend
+        .call<TaskStatus[]>("tasks", { room })
+        .catch(() => [] as TaskStatus[]);
+      const titles = new Map(statuses.map((status) => [status.task.id, status.task.title]));
+      for (const status of Array.isArray(statuses) ? statuses : []) {
+        if (status.task.state !== "open") continue;
+        const cancelled = (status.waitingOn ?? [])
+          .filter((link) => link.state === "cancelled")
+          .map((link) => link.id);
+        if (cancelled.length === 0) continue;
+        const named = cancelled.map((id) => `${id} (${titles.get(id) ?? "unknown"})`).join(", ");
+        found.push({
+          key: `${STALLED_PREFIX}${status.task.id}:${[...cancelled].sort().join(",")}`,
+          taskId: status.task.id,
+          author: agentId,
+          text:
+            `Task ${status.task.id} (${status.task.title}) cannot start: it waits on ${named}, which was cancelled and will never complete. ` +
+            `Choose one: relink (drop the cancelled dependency and let it start), replace (rebuild the cancelled task and move this one onto it), or stop (cancel this task).`,
+        });
+      }
+    }
+    return found;
+  }
+
+  /** Whether the task is still open and still waits on the same cancelled tasks the situation named. */
+  private async stillStalled(
+    taskId: string,
+    key: string,
+    superagent: SuperagentPolicy,
+  ): Promise<boolean> {
+    const { backend } = this.options;
+    for (const room of workerRooms(superagent)) {
+      const detail = await backend
+        .call<TaskDetail | null>("taskShow", { room, taskId })
+        .catch(() => null);
+      if (detail === null || detail === undefined) continue;
+      if (detail.task.state !== "open") return false;
+      const cancelled = (detail.waitingOn ?? [])
+        .filter((link) => link.state === "cancelled")
+        .map((link) => link.id)
+        .sort()
+        .join(",");
+      return cancelled !== "" && key === `${STALLED_PREFIX}${taskId}:${cancelled}`;
+    }
+    return false;
+  }
+
+  /** Tell the owner a stuck task is still stuck, when the decision could not fix it. */
+  private async sayStalled(conversation: Conversation, text: string, lang: Lang): Promise<void> {
+    const { backend, agentId } = this.options;
+    const say = words(lang);
+    await reply(backend, conversation, agentId, say.stalled(text), this.log).catch(
+      (error: unknown) => this.log(`could not say a task is stuck: ${describeError(error)}`),
+    );
+  }
+
+  /**
    * Act on what the small superagents report, and on workers nobody picked up.
    *
    * Each situation is decided once. The decision may move the worker, stop
@@ -571,6 +664,7 @@ export class BigSuperagent {
     const { backend, agentId } = this.options;
     const work = workRoom(superagent);
     const situations: { key: string; taskId: string; author: string; text: string }[] = [];
+    situations.push(...(await this.stalledSituations(superagent)));
     const messages = await backend
       .call<Message[]>("read", { room: work })
       .catch(() => [] as Message[]);
@@ -611,18 +705,39 @@ export class BigSuperagent {
     const done: { key: string; decision: RouteDecision["kind"] | "undecided" }[] = [];
     for (const situation of situations) {
       if (done.length >= MAX_COORDINATION_PER_PASS || signal?.aborted === true) break;
-      if (state.noted[situation.key] !== undefined) continue;
+      const stuck = situation.key.startsWith(STALLED_PREFIX);
+      const seen = state.noted[situation.key];
+      // A stuck task is looked at again after a while: a decision that did not
+      // fix it must not end the matter.
+      if (seen !== undefined && !(stuck && this.now() - seen > STALLED_RETRY_MS)) continue;
+      // An earlier decision in this pass may already have fixed it (a replace
+      // moves every task that waited on the cancelled one).
+      if (stuck && !(await this.stillStalled(situation.taskId, situation.key, superagent)))
+        continue;
       state.noted[situation.key] = this.now();
       const tracked = state.tracked[situation.taskId];
-      if (tracked === undefined) continue;
-      const conversation: Conversation = {
-        room: tracked.conversation.room,
-        thread: tracked.conversation.thread,
-        messageId: tracked.conversation.messageId,
-        author: tracked.conversation.author,
-        text: situation.text,
-        context: [],
-      };
+      if (tracked === undefined && !stuck) continue;
+      const conversation: Conversation =
+        tracked === undefined
+          ? {
+              // Nobody asked for this task through Big, so there is no conversation
+              // to answer in: the owner is told in the conversation room directly.
+              room: superagent.big.room,
+              thread: "",
+              messageId: "",
+              author: agentId,
+              text: situation.text,
+              context: [],
+            }
+          : {
+              room: tracked.conversation.room,
+              thread: tracked.conversation.thread,
+              messageId: tracked.conversation.messageId,
+              author: tracked.conversation.author,
+              text: situation.text,
+              context: [],
+            };
+      const lang = tracked?.conversation.lang ?? langOf(situation.text);
       const decided = await decide(
         { text: situation.text, author: situation.author, context: [] },
         {
@@ -639,24 +754,45 @@ export class BigSuperagent {
           ...(superagent.big.runner === undefined ? {} : { runner: superagent.big.runner }),
           ...(this.options.ask === undefined ? {} : { ask: this.options.ask }),
           ...(this.mind === undefined ? {} : { mind: this.mind }),
+          ...(this.options.gate === undefined ? {} : { gate: this.options.gate }),
           ...(signal === undefined ? {} : { signal }),
         },
       );
-      if (decided.decision === null) {
-        this.log(`could not coordinate ${situation.key}: ${decided.why ?? "unknown"}`);
+      if (decided.decision === null || (stuck && decided.decision.kind === "ignore")) {
+        this.log(`could not coordinate ${situation.key}: ${decided.why ?? "no action chosen"}`);
+        if (stuck) await this.sayStalled(conversation, situation.text, lang);
         done.push({ key: situation.key, decision: "undecided" });
         continue;
       }
       try {
         const acted = await act(
-          { backend, agentId, policy: superagent, log: this.log },
+          {
+            backend,
+            agentId,
+            policy: superagent,
+            ...attemptsOf(worker),
+            log: this.log,
+          },
           conversation,
           decided.decision,
           workerRooms(superagent),
         );
+        for (const deployed of acted.deployed) {
+          state.tracked[deployed.taskId] = {
+            room: deployed.room,
+            conversation: tracked?.conversation ?? {
+              room: conversation.room,
+              thread: conversation.thread,
+              messageId: conversation.messageId,
+              author: conversation.author,
+              lang,
+            },
+          };
+        }
         if (acted.reply !== "") await reply(backend, conversation, agentId, acted.reply, this.log);
       } catch (error) {
         this.log(`coordination ${situation.key} failed: ${describeError(error)}`);
+        if (stuck) await this.sayStalled(conversation, situation.text, lang);
       }
       done.push({ key: situation.key, decision: decided.decision.kind });
     }
@@ -666,6 +802,12 @@ export class BigSuperagent {
     }
     return done;
   }
+}
+
+/** `maxAttempts` for the workers a decision deploys, when tiers may be climbed. */
+export function attemptsOf(worker: WorkerPolicy): { maxAttempts?: number } {
+  const attempts = escalationAttempts(worker);
+  return attempts === undefined ? {} : { maxAttempts: attempts };
 }
 
 /** The runner a superagent thinks with, or undefined when none is allowed (decide says why). */

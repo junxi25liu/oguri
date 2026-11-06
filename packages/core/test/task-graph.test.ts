@@ -212,6 +212,95 @@ describe("dependency-gated claims", () => {
   });
 });
 
+describe("relinking dependencies", () => {
+  it("lets the creator drop a cancelled dependency, which frees the task and leaves an audit event", () => {
+    const dep = new Chain("alice-codex", { title: "Dropped" });
+    const keep = new Chain("alice-codex", { title: "Kept" });
+    const task = new Chain("alice-codex", { title: "Behind it", dependsOn: [dep.id, keep.id] });
+    dep.append("alice-codex", { action: "cancelled", state: "cancelled" });
+    keep.finish("bob-claude");
+    assert.equal(
+      statusOf([...dep.events, ...keep.events, ...task.events], task.id).health,
+      "blocked",
+    );
+
+    const event = task.append("alice-codex", { action: "relinked", dependsOn: [keep.id] });
+    const room = [...dep.events, ...keep.events, ...task.events];
+    const status = statusOf(room, task.id);
+    assert.deepEqual(status.invalidEvents, []);
+    assert.deepEqual(status.task.dependsOn, [keep.id]);
+    assert.deepEqual(status.waitingOn, []);
+    assert.equal(status.ready, true);
+    assert.equal(status.health, "active");
+
+    // The audit trail names the event, its author, and the resulting state.
+    const detail = reduceTaskDetail(room, task.id, NOW);
+    const audited = detail?.events.at(-1);
+    assert.equal(audited?.messageId, event.header.id);
+    assert.equal(audited?.action, "relinked");
+    assert.equal(audited?.from, "alice-codex");
+    assert.equal(audited?.state, "open");
+    // And the next claim is accepted, because the dependency set now is the live one.
+    task.claim("bob-claude");
+    assert.equal(
+      statusOf([...dep.events, ...keep.events, ...task.events], task.id).task.state,
+      "claimed",
+    );
+  });
+
+  it("refuses a relink after the task is claimed, and from anyone but the creator", () => {
+    const dep = new Chain("alice-codex", { title: "Dep" });
+    const task = new Chain("alice-codex", { title: "Work", dependsOn: [dep.id] });
+    const byStranger = task.branch("bob-claude", { action: "relinked" }, ["dependsOn"]);
+    dep.finish("bob-claude");
+    // Written against the still-open snapshot, but ordered after the claim.
+    const claim = task.claim("bob-claude");
+    const late = task.branch("alice-codex", { action: "relinked", state: "open" }, [
+      "dependsOn",
+      "assignee",
+    ]);
+
+    const status = statusOf([...dep.events, ...task.events, byStranger, late], task.id);
+    assert.equal(status.task.state, "claimed");
+    assert.equal(status.currentMessageId, claim.header.id);
+    assert.deepEqual(status.task.dependsOn, [dep.id]);
+    const reasons = new Map(status.invalidEvents.map((event) => [event.messageId, event.reason]));
+    assert.match(reasons.get(byStranger.header.id) ?? "", /only the task creator/);
+    assert.match(reasons.get(late.header.id) ?? "", /only while the task is open/);
+  });
+
+  it("rejects a relink that would make two tasks wait on each other, whichever order they arrive in", () => {
+    const a = new Chain("alice-codex", { title: "A" });
+    const b = new Chain("alice-codex", { title: "B", dependsOn: [a.id] });
+    const loop = a.append("alice-codex", { action: "relinked", dependsOn: [b.id] });
+
+    const room = [...a.events, ...b.events];
+    for (const order of [room, [...room].reverse()]) {
+      const status = statusOf(order, a.id);
+      assert.equal(status.task.dependsOn, undefined);
+      const rejected = status.invalidEvents.find((event) => event.messageId === loop.header.id);
+      assert.equal(rejected?.code, "DEPENDENCY_CYCLE");
+    }
+  });
+
+  it("keeps a claim's verdict tied to the dependencies the task had at that point", () => {
+    const first = new Chain("alice-codex", { title: "First" });
+    const second = new Chain("alice-codex", { title: "Second" });
+    const task = new Chain("alice-codex", { title: "Gated", dependsOn: [first.id] });
+    const early = task.strayClaim("bob-claude");
+    task.append("alice-codex", { action: "relinked", dependsOn: [second.id] });
+    second.finish("carol-cursor");
+    const claim = task.claim("bob-claude");
+
+    const status = statusOf([...first.events, ...second.events, ...task.events, early], task.id);
+    assert.equal(status.currentMessageId, claim.header.id);
+    assert.equal(
+      status.invalidEvents.find((event) => event.messageId === early.header.id)?.code,
+      "DEPENDENCY_PENDING",
+    );
+  });
+});
+
 describe("attempts", () => {
   it("counts accepted claims, keeps the count across release, and stops at the limit", () => {
     const task = new Chain("alice-codex", { title: "Flaky deploy", maxAttempts: 2 });
@@ -416,6 +505,138 @@ describe("task graph through the network", () => {
       /no task .* in room graph/,
     );
     assert.equal((await alice.read("graph")).length, before);
+  });
+
+  it("changes an open task's dependencies through updateTask, and refuses everything unsafe", async () => {
+    const gone = await alice.createTask("graph", {
+      title: "Cancelled work",
+      definition: "Dropped.",
+    });
+    const goneId = gone.header.task?.id as string;
+    const live = await alice.createTask("graph", {
+      title: "Live work",
+      definition: "Still wanted.",
+    });
+    const liveId = live.header.task?.id as string;
+    const waiting = await alice.createTask("graph", {
+      title: "Waits on both",
+      definition: "Needs both.",
+      dependsOn: [goneId, liveId],
+    });
+    const waitingId = waiting.header.task?.id as string;
+    await alice.updateTask("graph", goneId, { action: "cancelled", body: "Not needed." });
+
+    const stuck = (await alice.listTasks("graph")).find((s) => s.task.id === waitingId);
+    assert.equal(stuck?.health, "blocked");
+
+    // Nothing to change, an id that is not a dependency, an unknown task, itself.
+    assert.match(
+      (await refusal(alice.updateTask("graph", waitingId, { action: "relinked", body: "x" })))
+        .message,
+      /at least one dependency/,
+    );
+    assert.match(
+      (
+        await refusal(
+          alice.updateTask("graph", waitingId, {
+            action: "relinked",
+            body: "x",
+            removeDependsOn: [ulid()],
+          }),
+        )
+      ).message,
+      /not a dependency of this task/,
+    );
+    assert.match(
+      (
+        await refusal(
+          alice.updateTask("graph", waitingId, {
+            action: "relinked",
+            body: "x",
+            addDependsOn: [ulid()],
+          }),
+        )
+      ).message,
+      /no task .* in room graph/,
+    );
+    assert.match(
+      (
+        await refusal(
+          alice.updateTask("graph", waitingId, {
+            action: "relinked",
+            body: "x",
+            addDependsOn: [waitingId],
+          }),
+        )
+      ).message,
+      /must not name the task itself|cycle|itself/,
+    );
+    // The flags belong to relinking alone.
+    assert.match(
+      (
+        await refusal(
+          alice.updateTask("graph", waitingId, {
+            action: "refined",
+            body: "x",
+            removeDependsOn: [goneId],
+          }),
+        )
+      ).message,
+      /only relinking/,
+    );
+    // Only the creator.
+    await bob.sync();
+    assert.match(
+      (
+        await refusal(
+          bob.updateTask("graph", waitingId, {
+            action: "relinked",
+            body: "x",
+            removeDependsOn: [goneId],
+          }),
+        )
+      ).message,
+      /only the task creator may change dependencies/,
+    );
+
+    const event = await alice.updateTask("graph", waitingId, {
+      action: "relinked",
+      body: "Dropping the cancelled dependency.",
+      removeDependsOn: [goneId],
+    });
+    assert.equal(event.header.task?.action, "relinked");
+    assert.deepEqual(event.header.task?.dependsOn, [liveId]);
+    assert.ok(event.header.tags.includes("task-action:relinked"));
+    const after = (await alice.listTasks("graph")).find((s) => s.task.id === waitingId);
+    assert.deepEqual(after?.waitingOn, [{ id: liveId, state: "open" }]);
+    assert.notEqual(after?.health, "blocked");
+    const detail = await alice.showTask("graph", waitingId);
+    assert.equal(detail.events.at(-1)?.action, "relinked");
+    assert.equal(detail.events.at(-1)?.body.trim(), "Dropping the cancelled dependency.");
+
+    // Add one, then once someone has claimed it the dependencies are fixed.
+    await alice.updateTask("graph", waitingId, {
+      action: "relinked",
+      body: "Also wait for the cancelled one's replacement.",
+      addDependsOn: [goneId],
+    });
+    await alice.updateTask("graph", waitingId, {
+      action: "relinked",
+      body: "Back to just the live one.",
+      removeDependsOn: [goneId],
+    });
+    await alice.updateTask("graph", liveId, { action: "claimed", body: "taking it" });
+    await alice.updateTask("graph", liveId, { action: "started", body: "go" });
+    await alice.updateTask("graph", liveId, { action: "completed", body: "done" });
+    await alice.updateTask("graph", waitingId, { action: "claimed", body: "mine" });
+    const claimed = await refusal(
+      alice.updateTask("graph", waitingId, {
+        action: "relinked",
+        body: "too late",
+        removeDependsOn: [liveId],
+      }),
+    );
+    assert.match(claimed.message, /only while the task is open/);
   });
 
   it("gives each graph refusal its own code, and claims once the graph allows it", async () => {

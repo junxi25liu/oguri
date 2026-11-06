@@ -15,8 +15,8 @@
  *
  * The session is a view, never the record: every turn carries a fresh
  * snapshot of the transport repository, and every reply is checked in code. A
- * session starts afresh when its standing rules change or after
- * `MAX_SESSION_TURNS`, so its context never grows without bound.
+ * session starts afresh when its standing rules change, not after a
+ * fixed number of turns. Long-context compaction belongs to the runner.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -28,8 +28,6 @@ import { describeError, SESSION_TOKEN, type SessionMode } from "@oguri/core";
 
 import { askModel, type AskModel, type ModelResult } from "./model.ts";
 
-/** Turns in one session before it starts afresh. */
-export const MAX_SESSION_TURNS = 60;
 const KILL_GRACE_MS = 5_000;
 const MAX_LINE_BYTES = 1024 * 1024;
 
@@ -106,11 +104,9 @@ export function rulesHash(rules: string): string {
   return createHash("sha256").update(rules).digest("hex").slice(0, 16);
 }
 
-/** The session continues: same rules, room to grow, and an id to resume. */
+/** The session continues: same rules and an id to resume, regardless of turn count. */
 function continues(record: SessionRecord, rules: string): boolean {
-  return (
-    record.id !== undefined && record.rules === rulesHash(rules) && record.turns < MAX_SESSION_TURNS
-  );
+  return record.id !== undefined && record.rules === rulesHash(rules);
 }
 
 function resumeArgv(resume: readonly string[], id: string): string[] {
@@ -307,11 +303,8 @@ export class StreamMind implements Mind {
   private async run(request: TurnRequest): Promise<ModelResult> {
     let record = await this.store.read();
     const hash = rulesHash(request.rules);
-    if (
-      record.turns >= MAX_SESSION_TURNS ||
-      (record.rules !== undefined && record.rules !== hash)
-    ) {
-      // New rules, or a long session: start afresh.
+    if (record.rules !== undefined && record.rules !== hash) {
+      // New standing rules: start afresh. Context compaction belongs to the runner.
       await this.stop();
       record = { turns: 0 };
       await this.store.write(record);

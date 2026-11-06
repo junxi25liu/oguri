@@ -312,6 +312,7 @@ plus `task_stale_after_seconds`. Any valid event refreshes that deadline.
 | `created`    | creator             | creates `open`                                                  |
 | `refined`    | any agent           | preserves state and assignment; MAY replace title and body      |
 | `retargeted` | creator             | `open` → `open`; changes or removes `task_target`               |
+| `relinked`   | creator             | `open` → `open`; changes `task_depends_on` (§4.5.1)             |
 | `claimed`    | matching agent      | `open` → `claimed`; sets itself as `task_assignee`              |
 | `started`    | assignee            | `claimed` / `blocked` / `stuck` → `in_progress`                 |
 | `progressed` | assignee            | `in_progress` → `in_progress`                                   |
@@ -356,11 +357,23 @@ for sealing even when their current event has `needs: none` (§9).
 The six graph fields above are optional. A task without them reads exactly as it did before
 they existed. An empty array is equivalent to an absent field, and a writer SHOULD omit both.
 
-`task_depends_on`, `task_parent`, `task_requires`, and `task_max_attempts` are fixed at
-creation, like `task_id`. Every later event MUST repeat them unchanged, and a reader MUST
-reject an event that adds, drops, or alters one. In particular a `refined` event cannot change
-dependencies. A client that does not know these fields writes snapshots without them, so its
-events on a task that has them are rejected rather than accepted with the constraint gone.
+`task_depends_on` is fixed at creation and changes only through `relinked` (below);
+`task_parent`, `task_requires`, and `task_max_attempts` are fixed at creation, like `task_id`.
+Every later event MUST repeat them unchanged, and a reader MUST reject an event that adds,
+drops, or alters one. In particular a `refined` event cannot change dependencies. A client that
+does not know these fields writes snapshots without them, so its events on a task that has them
+are rejected rather than accepted with the constraint gone.
+
+- **Relinking.** A `relinked` event replaces `task_depends_on` with the list it carries, and
+  changes nothing else. It is valid only when its author is `task_creator`, the task is `open`
+  with no `task_assignee`, the list differs from the previous one, and the new list would not
+  make the task wait on itself through any chain of dependencies, evaluated at the event's
+  position in protocol order (§13). A reader MUST reject it otherwise; a client that predates
+  `relinked` already rejects the unknown action rather than misreading it, and no existing
+  event changes meaning. The event is the audit record: its body says why, and the author and
+  the resulting list are in the log. A claim is still checked against the dependencies the task
+  has at the claim's position, so a relink never rewrites an earlier verdict. Clearing every
+  dependency omits `task_depends_on`.
 
 - **Dependencies.** `task_depends_on` lists distinct task ids, never the task's own id. A
   `claimed` event is valid only if every listed task is in state `completed` at the claim's
@@ -391,7 +404,8 @@ events on a task that has them are rejected rather than accepted with the constr
 A reader SHOULD expose, per task, the dependencies not yet completed with their states, whether
 the task is ready to claim (open, every dependency completed, an attempt left), and the tasks
 whose `task_parent` names it. An open task with a `cancelled` dependency SHOULD be reported as
-blocked: that dependency will not complete by waiting.
+blocked: that dependency will not complete by waiting, and the creator can end the wait with
+`relinked`.
 
 Sealing (§9) MUST keep a terminal task's current event, with its reply chain, in the live
 window while a task that depends on it is reduced from the window. Otherwise readers would

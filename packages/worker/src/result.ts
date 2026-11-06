@@ -9,7 +9,13 @@
  * The file comes from a process the worker does not trust to be careful, and
  * what it says is published. So it is read strictly: a size cap, a regular file
  * only, no unknown keys, every value checked. Anything wrong and the whole file
- * is ignored, and the report says so.
+ * is rejected; the run is then not reported as a completion, and the report
+ * says why.
+ *
+ * An optional field may be left out, and `null` says the same thing except
+ * for `outcome`, which accepts only `noop`: JSON has no `undefined`, so an agent
+ * with nothing to put there writes `null` as often as it writes nothing.
+ * Every other value of every field is still checked.
  */
 
 import { lstat, readFile } from "node:fs/promises";
@@ -20,7 +26,7 @@ import { hasSecrets } from "@oguri/core";
 export const RESULT_FILE = "result.json";
 export const RESULT_FILE_LIMIT = 64 * 1024;
 
-const RESULT_KEYS = ["summary", "branch", "pr", "artifacts", "needsHuman"] as const;
+const RESULT_KEYS = ["summary", "branch", "pr", "artifacts", "needsHuman", "outcome"] as const;
 const MAX_ARTIFACTS = 32;
 const MAX_REF_LENGTH = 500;
 /** A question for a person is read on a phone; it does not need to be long. */
@@ -33,6 +39,12 @@ export interface StructuredResult {
   pr?: string;
   artifacts?: string[];
   needsHuman?: string;
+  outcome?: "noop";
+}
+
+/** The same wording is used in the task report and in its chat relay. */
+export function resultSummary(result: StructuredResult): string {
+  return result.outcome === "noop" ? `No change needed: ${result.summary}` : result.summary;
 }
 
 export type ResultRead =
@@ -49,18 +61,30 @@ export function resultPath(runDir: string): string {
  *
  * Plain text an agent reads like the rest of the task. It names the path as
  * well as the variable, because some executors cannot see their environment.
+ * The template shows only the fields a run usually has: `pr` is not in it,
+ * because a run with no pull request must leave the key out rather than write
+ * a placeholder. `null` is read as "left out" as a kindness to executors that
+ * emit it, not as a value the prompt asks for.
  */
-export function resultFooter(path: string): string {
+export function resultFooter(path: string, required = false): string {
   return [
     "",
     "",
     "---",
     `oguri: when you finish, you may write a JSON result to ${path} (also in $OGURI_RESULT_FILE):`,
-    '{"summary": "what you did, for the person who asked", "branch": "git branch with the work", "pr": "pull request URL", "artifacts": ["paths of files you produced"], "needsHuman": "a question a person must answer before this can finish"}',
-    'Only "summary" is required. Without the file, the end of your output is reported instead.',
+    '{"summary": "what you did, for the person who asked", "branch": "git branch with the work", "artifacts": ["paths of files you produced"]}',
+    'Only "summary" is required. Add "pr" only when there is a pull request a person can open. Add "needsHuman" only when a person must answer something before this can finish.',
+    'Add "outcome": "noop" only when you checked and no change is needed. No other outcome value is accepted.',
+    "Leave a field out when you have nothing for it: do not write null, an empty string, or a placeholder URL. Any other key makes the whole file invalid.",
+    required
+      ? "This runner requires this file: a run that ends without a valid one is not counted as finished."
+      : "Without the file, the end of your output is reported instead.",
     "",
   ].join("\n");
 }
+
+/** Why a run on a runner that requires `result.json` is not a completion when it wrote none. */
+export const RESULT_REQUIRED_REASON = "this runner requires a result.json and the run wrote none";
 
 function oneLine(value: string): boolean {
   // eslint-disable-next-line no-control-regex
@@ -97,6 +121,18 @@ function nonEmpty(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+/**
+ * The value of an optional field, with `null` read as "left out".
+ *
+ * A file written by hand or by a model has no `undefined`: the natural way to
+ * say "no pull request" is `"pr": null`. Refusing the whole file for that loses
+ * everything else it said, a `needsHuman` question included. Only `null` is
+ * forgiven; every other value of every field is still checked below.
+ */
+function optional(raw: Record<string, unknown>, key: string): unknown {
+  return raw[key] === null ? undefined : raw[key];
+}
+
 /** Check the parsed JSON against the schema. Returns the reason it fails, or the result. */
 export function validateResult(value: unknown): StructuredResult | string {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -110,19 +146,23 @@ export function validateResult(value: unknown): StructuredResult | string {
   if (!nonEmpty(raw["summary"])) return '"summary" must be a non-empty string';
 
   const result: StructuredResult = { summary: raw["summary"].trim() };
-  const branch = raw["branch"];
+  if (Object.hasOwn(raw, "outcome")) {
+    if (raw["outcome"] !== "noop") return '"outcome" must be "noop"';
+    result.outcome = "noop";
+  }
+  const branch = optional(raw, "branch");
   if (branch !== undefined) {
     if (typeof branch !== "string" || !validBranch(branch)) {
       return '"branch" must be a git branch name';
     }
     result.branch = branch;
   }
-  const pr = raw["pr"];
+  const pr = optional(raw, "pr");
   if (pr !== undefined) {
     if (typeof pr !== "string" || !validUrl(pr)) return '"pr" must be an https URL';
     result.pr = pr;
   }
-  const artifacts = raw["artifacts"];
+  const artifacts = optional(raw, "artifacts");
   if (artifacts !== undefined) {
     if (!Array.isArray(artifacts) || artifacts.length > MAX_ARTIFACTS) {
       return `"artifacts" must be a list of at most ${String(MAX_ARTIFACTS)} paths`;
@@ -139,7 +179,7 @@ export function validateResult(value: unknown): StructuredResult | string {
     }
     result.artifacts = [...new Set(artifacts as string[])];
   }
-  const needsHuman = raw["needsHuman"];
+  const needsHuman = optional(raw, "needsHuman");
   if (needsHuman !== undefined) {
     if (!nonEmpty(needsHuman)) return '"needsHuman" must be a non-empty string';
     result.needsHuman = needsHuman.trim();

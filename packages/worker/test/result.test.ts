@@ -15,7 +15,7 @@ import {
 import { runExecutor } from "../src/runner.ts";
 import { listRuns } from "../src/runs.ts";
 import { Worker } from "../src/worker.ts";
-import { ME, fakeBackend, policy, result } from "./fake-backend.ts";
+import { ME, ORIGIN, fakeBackend, policy, result } from "./fake-backend.ts";
 
 const ID_A = "01JAAAAAAAAAAAAAAAAAAAAAAA";
 const TOKEN = `ghp_${"a1B2c3D4e5F6g7H8i9J0".repeat(2).slice(0, 36)}`;
@@ -55,9 +55,43 @@ describe("result.json schema", () => {
     refused({ summary: "x", branch: "has space" }, /"branch"/);
     refused({ summary: "x", pr: "http://example.com/pr/1" }, /https URL/);
     refused({ summary: "x", pr: "https://user:pw@example.com/pr/1" }, /https URL/);
+    refused({ summary: "x", pr: "https://" }, /https URL/);
+    refused({ summary: "x", pr: "" }, /https URL/);
     refused({ summary: "x", artifacts: "a.txt" }, /"artifacts"/);
     refused({ summary: "x", artifacts: ["a\nb"] }, /single-line/);
     refused({ summary: "x", needsHuman: "" }, /"needsHuman"/);
+  });
+
+  it("accepts only noop as an outcome and rejects the whole file for other values", async () => {
+    assert.deepEqual(validateResult({ summary: "Checked it.", outcome: "noop" }), {
+      summary: "Checked it.",
+      outcome: "noop",
+    });
+    const path = join(home, "result.json");
+    for (const outcome of ["completed", "failed", "", "NOOP", null, 0, false, [], {}]) {
+      const value = { summary: "Checked it.", outcome };
+      assert.equal(validateResult(value), '"outcome" must be "noop"');
+      await writeFile(path, JSON.stringify(value));
+      assert.deepEqual(await readResult(path), {
+        kind: "invalid",
+        reason: '"outcome" must be "noop"',
+      });
+    }
+  });
+
+  it("accepts a run with no pull request, and reads null as 'left out'", () => {
+    // JSON has no undefined: an agent with no PR writes null as often as nothing.
+    assert.deepEqual(validateResult({ summary: "Done it." }), { summary: "Done it." });
+    assert.deepEqual(
+      validateResult({ summary: "Done it.", pr: null, branch: null, artifacts: null }),
+      { summary: "Done it." },
+    );
+    assert.deepEqual(
+      validateResult({ summary: "Half done.", pr: null, needsHuman: "Which table?" }),
+      { summary: "Half done.", needsHuman: "Which table?" },
+    );
+    // null is forgiven only for an optional field; a missing summary is still refused.
+    assert.equal(typeof validateResult({ summary: null, pr: null }), "string");
   });
 
   it("reads only a small regular file of valid JSON", async () => {
@@ -115,6 +149,24 @@ describe("result.json schema", () => {
     assert.match(footer, /\$OGURI_RESULT_FILE/);
     assert.match(footer, /"summary"/);
   });
+
+  it("does not put a pr field in front of a run that has no pull request", () => {
+    // The template is copied verbatim by agents that have nothing to put there,
+    // so showing `pr` is an invitation to write `"pr": null` or a placeholder.
+    const footer = resultFooter("/runs/T/R/result.json");
+    assert.doesNotMatch(footer, /"pr":/);
+    assert.match(footer, /Add "pr" only when there is a pull request/);
+    assert.match(footer, /do not write null/);
+  });
+});
+
+describe("the prompt footer for a runner that requires the file", () => {
+  it("says the file is required, and keeps the optional wording otherwise", () => {
+    assert.match(resultFooter("/runs/T/R/result.json", true), /requires this file/);
+    assert.doesNotMatch(resultFooter("/runs/T/R/result.json", true), /Without the file/);
+    assert.match(resultFooter("/runs/T/R/result.json"), /Without the file/);
+    assert.doesNotMatch(resultFooter("/runs/T/R/result.json"), /requires this file/);
+  });
 });
 
 describe("reports from a result", () => {
@@ -142,6 +194,39 @@ describe("reports from a result", () => {
     assert.deepEqual(report.refs, ["https://github.com/acme/app/pull/7"]);
   });
 
+  it("completes a noop result with a No change needed summary prefix", () => {
+    const report = buildReport({
+      ...base,
+      result: result(),
+      read: {
+        kind: "valid",
+        result: { summary: "The settings are already correct.", outcome: "noop" },
+      },
+    });
+    assert.equal(report.action, "completed");
+    assert.equal(report.needsHuman, false);
+    assert.match(report.body, /\n\nNo change needed: The settings are already correct\./);
+  });
+
+  it("does not let noop override failure or a question for a person", () => {
+    const failed = buildReport({
+      ...base,
+      result: result({ exitCode: 1 }),
+      read: { kind: "valid", result: { summary: "Checked it.", outcome: "noop" } },
+    });
+    assert.equal(failed.action, "blocked");
+    const asking = buildReport({
+      ...base,
+      result: result(),
+      read: {
+        kind: "valid",
+        result: { summary: "Checked it.", outcome: "noop", needsHuman: "Which environment?" },
+      },
+    });
+    assert.equal(asking.action, "blocked");
+    assert.equal(asking.needsHuman, true);
+  });
+
   it("withholds a structured summary the secret scanner flags", () => {
     const report = buildReport({
       ...base,
@@ -152,14 +237,94 @@ describe("reports from a result", () => {
     assert.doesNotMatch(report.body, /ghp_/);
   });
 
-  it("falls back to the output tail and says why when result.json is invalid", () => {
+  it("falls back to the output tail and says why when result.json is rejected", () => {
     const report = buildReport({
       ...base,
       result: result({ stdoutTail: "patched 3 files" }),
       read: { kind: "invalid", reason: "it is not valid JSON" },
     });
-    assert.match(report.body, /result\.json was ignored: it is not valid JSON/);
+    assert.match(report.body, /result\.json was rejected: it is not valid JSON/);
     assert.match(report.body, /patched 3 files/);
+  });
+
+  it("never completes a task whose result.json was rejected, whatever the exit code", () => {
+    for (const exitCode of [0, 1]) {
+      const report = buildReport({
+        ...base,
+        attempt: 1,
+        maxAttempts: 3,
+        result: result({ exitCode }),
+        read: { kind: "invalid", reason: "unknown key(s): pr_url" },
+      });
+      assert.equal(report.action, "released", `exit ${String(exitCode)}`);
+      assert.match(report.body, /result\.json was rejected: unknown key\(s\): pr_url/);
+      assert.match(report.body, /Released for another try/);
+      // Exit 0 is the case that used to complete the task: it must say so.
+      assert.equal(
+        /not reported as a completion/.test(report.body),
+        exitCode === 0,
+        "only a run that exited 0 would otherwise have been reported as done",
+      );
+      assert.doesNotMatch(report.body, /^Done by worker/);
+    }
+  });
+
+  it("blocks with the rejection reason once a rejected run has no attempts left", () => {
+    const report = buildReport({
+      ...base,
+      attempt: 3,
+      maxAttempts: 3,
+      result: result({ exitCode: 0 }),
+      read: { kind: "invalid", reason: '"pr" must be an https URL' },
+    });
+    assert.equal(report.action, "blocked");
+    assert.equal(report.needsHuman, true);
+    assert.match(report.body, /the run's result\.json was rejected/);
+    assert.match(report.body, /"pr" must be an https URL/);
+  });
+
+  it("reports a rejected result through the retry rules, like a failed run with no attempts", () => {
+    const report = buildReport({
+      ...base,
+      result: result({ exitCode: 0 }),
+      read: { kind: "invalid", reason: "it is not a regular file" },
+    });
+    assert.equal(report.action, "blocked");
+    assert.equal(report.needsHuman, false);
+    assert.match(report.body, /Blocked: the run's result\.json was rejected/);
+  });
+
+  it("still completes a clean run with no pull request", () => {
+    const report = buildReport({
+      ...base,
+      result: result(),
+      read: { kind: "valid", result: { summary: "Fixed it." } },
+    });
+    assert.equal(report.action, "completed");
+    assert.deepEqual(report.refs, []);
+    assert.doesNotMatch(report.body, /not reported as a completion/);
+  });
+
+  it("completes a run that wrote no result.json, and says so in the report", () => {
+    // A runner with no result protocol keeps completing; the report no longer
+    // hides that nothing was submitted.
+    const report = buildReport({
+      ...base,
+      result: result({ stdoutTail: "patched 3 files" }),
+      read: { kind: "absent" },
+    });
+    assert.equal(report.action, "completed");
+    assert.match(report.body, /no result\.json was written/);
+    assert.match(report.body, /patched 3 files/);
+  });
+
+  it("does not claim a missing result.json when the run wrote a valid one", () => {
+    const report = buildReport({
+      ...base,
+      result: result(),
+      read: { kind: "valid", result: { summary: "Fixed it." } },
+    });
+    assert.doesNotMatch(report.body, /no result\.json/);
   });
 
   it("blocks with needs:human when the executor asks a question, whatever its exit code", () => {
@@ -236,7 +401,37 @@ describe("structured results through a worker run", () => {
     assert.deepEqual(done?.refs, ["branch:ops/rotate", `artifact:build-01:${home}/rotated.txt`]);
   });
 
-  it("records an invalid result.json on the run and reports the output instead", async () => {
+  it("publishes a noop as completed and relays the same wording", async () => {
+    const { backend, updates, sent } = fakeBackend([{ id: ID_A, origin: ORIGIN }]);
+    const worker = new Worker({
+      backend,
+      agentId: ME,
+      home,
+      loadPolicy: async () => policy({ workdir: home }),
+      executor: async (request) => {
+        await mkdir(request.logDir, { recursive: true });
+        await writeFile(
+          request.env?.["OGURI_RESULT_FILE"] as string,
+          JSON.stringify({ summary: "The settings are already correct.", outcome: "noop" }),
+        );
+        return result();
+      },
+    });
+    await worker.pass();
+    await worker.idle();
+    assert.equal(updates().at(-1)?.action, "completed");
+    assert.match(
+      updates().at(-1)?.body ?? "",
+      /No change needed: The settings are already correct\./,
+    );
+    assert.equal(
+      sent().find((message) => message.relay === "result")?.body,
+      "No change needed: The settings are already correct.",
+    );
+    assert.equal((await listRuns(home))[0]?.outcome, "completed");
+  });
+
+  it("records a rejected result.json on the run and does not report a completion", async () => {
     const { backend, updates } = fakeBackend([{ id: ID_A }]);
     const worker = new Worker({
       backend,
@@ -252,10 +447,128 @@ describe("structured results through a worker run", () => {
     await worker.pass();
     await worker.idle();
     const done = updates().at(-1);
-    assert.match(done?.body ?? "", /result\.json was ignored: "summary" must be/);
+    assert.equal(done?.action, "blocked", "exit 0 with a rejected file is not a completion");
+    assert.match(done?.body ?? "", /result\.json was rejected: "summary" must be/);
     assert.match(done?.body ?? "", /the real output/);
+    assert.match(done?.body ?? "", /not reported as a completion/);
     assert.equal(done?.refs, undefined);
-    assert.match((await listRuns(home))[0]?.note ?? "", /result\.json ignored/);
+    assert.match((await listRuns(home))[0]?.note ?? "", /result\.json rejected/);
+  });
+
+  it("publishes a needsHuman question even when a PR field is null", async () => {
+    const { backend, updates } = fakeBackend([{ id: ID_A }]);
+    const worker = new Worker({
+      backend,
+      agentId: ME,
+      home,
+      loadPolicy: async () => policy({ workdir: home }),
+      executor: async (request) => {
+        await mkdir(request.logDir, { recursive: true });
+        await writeFile(
+          request.env?.["OGURI_RESULT_FILE"] as string,
+          JSON.stringify({ summary: "Half done.", pr: null, needsHuman: "Drop the old table?" }),
+        );
+        return result();
+      },
+    });
+    await worker.pass();
+    await worker.idle();
+    const done = updates().at(-1);
+    assert.equal(done?.action, "blocked");
+    assert.equal(done?.needsHuman, true);
+    assert.match(done?.body ?? "", /Question: Drop the old table\?/);
+  });
+
+  it("completes a run with no result.json on a runner that does not require one, and records it", async () => {
+    const { backend, updates } = fakeBackend([{ id: ID_A }]);
+    const worker = new Worker({
+      backend,
+      agentId: ME,
+      home,
+      loadPolicy: async () => policy({ workdir: home }),
+      executor: async () => result({ stdoutTail: "the real output" }),
+    });
+    await worker.pass();
+    await worker.idle();
+    const done = updates().at(-1);
+    assert.equal(done?.action, "completed");
+    assert.match(done?.body ?? "", /no result\.json was written/);
+    assert.match(done?.body ?? "", /the real output/);
+    const [run] = await listRuns(home);
+    assert.equal(run?.outcome, "completed");
+    assert.match(run?.note ?? "", /no result\.json written/);
+  });
+
+  it("never completes a run with no result.json on a runner that requires one", async () => {
+    const { backend, updates } = fakeBackend([{ id: ID_A }]);
+    const worker = new Worker({
+      backend,
+      agentId: ME,
+      home,
+      loadPolicy: async () =>
+        policy({
+          workdir: home,
+          runners: { claude: { argv: ["claude", "-p"], worktree: false, requireResult: true } },
+        }),
+      executor: async () => result({ stdoutTail: "the real output" }),
+    });
+    await worker.pass();
+    await worker.idle();
+    const done = updates().at(-1);
+    assert.equal(done?.action, "blocked", "exit 0 without the required file is not a completion");
+    assert.match(done?.body ?? "", /requires a result\.json/);
+    assert.match(done?.body ?? "", /not reported as a completion/);
+    assert.match(done?.body ?? "", /the real output/);
+    assert.doesNotMatch(done?.body ?? "", /^Done by worker/);
+    const [run] = await listRuns(home);
+    assert.equal(run?.outcome, "blocked");
+    assert.match(run?.note ?? "", /result\.json rejected: .*requires/);
+  });
+
+  it("releases a required-result run that wrote nothing while attempts remain", async () => {
+    const { backend, updates } = fakeBackend([{ id: ID_A, maxAttempts: 3 }]);
+    const worker = new Worker({
+      backend,
+      agentId: ME,
+      home,
+      loadPolicy: async () =>
+        policy({
+          workdir: home,
+          runners: { claude: { argv: ["claude", "-p"], worktree: false, requireResult: true } },
+        }),
+      executor: async () => result(),
+    });
+    await worker.pass();
+    await worker.idle();
+    assert.equal(updates().at(-1)?.action, "released");
+  });
+
+  it("completes a required-result run that wrote a valid file", async () => {
+    const { backend, updates } = fakeBackend([{ id: ID_A }]);
+    const worker = new Worker({
+      backend,
+      agentId: ME,
+      home,
+      loadPolicy: async () =>
+        policy({
+          workdir: home,
+          runners: { claude: { argv: ["claude", "-p"], worktree: false, requireResult: true } },
+        }),
+      executor: async (request) => {
+        await mkdir(request.logDir, { recursive: true });
+        await writeFile(
+          request.env?.["OGURI_RESULT_FILE"] as string,
+          JSON.stringify({ summary: "Done properly." }),
+        );
+        return result();
+      },
+    });
+    await worker.pass();
+    await worker.idle();
+    const done = updates().at(-1);
+    assert.equal(done?.action, "completed");
+    assert.match(done?.body ?? "", /Done properly\./);
+    assert.doesNotMatch(done?.body ?? "", /no result\.json/);
   });
 
   it("lets a real executor write the file through the environment", async () => {

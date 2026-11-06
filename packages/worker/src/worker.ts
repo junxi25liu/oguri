@@ -12,7 +12,14 @@
 
 import { hostname } from "node:os";
 
-import { describeError, type Agenda, type TaskDetail, type WorkerPolicy } from "@oguri/core";
+import {
+  RunnerGrantStore,
+  describeError,
+  type Agenda,
+  type RunnerGate,
+  type TaskDetail,
+  type WorkerPolicy,
+} from "@oguri/core";
 import type { Backend } from "@oguri/daemon";
 
 import { RunBudget } from "./budget.ts";
@@ -20,13 +27,17 @@ import { publishCapabilities } from "./capabilities.ts";
 import { claimCandidate, retakeTask } from "./claim.ts";
 import { executeRun, type RunHost } from "./execute.ts";
 import { findFollowups, type Followup } from "./followup.ts";
-import { stopReason } from "./lifecycle.ts";
+import { gateCandidates, requestMissingRunners, type GateContext } from "./grants.ts";
+import { HomeSlots, type SlotLease } from "./home-slots.ts";
+import { abandonAction, stopReason } from "./lifecycle.ts";
 import { reconcileRuns, type Recovered } from "./recover.ts";
+import { reconcileReports, type Reported } from "./report.ts";
 import { RetryBackoff } from "./retry.ts";
 import { rollupAssigned, type RolledUp } from "./rollup.ts";
 import { killGroup, runExecutor, type Executor } from "./runner.ts";
 import { listRuns, newRunId, taskRuns, writeRunRecord, type RunRecord } from "./runs.ts";
 import { type Candidate, type Skipped, selectCandidates } from "./select.ts";
+import { runnerEffort, runnerModel } from "./session.ts";
 import type { McpServer } from "./tools.ts";
 
 export { expandHome } from "./workspace.ts";
@@ -51,6 +62,11 @@ export interface WorkerOptions {
   oguriMcp?: McpServer;
   /** How often a live session looks for a person's new messages. */
   liveIntervalMs?: number;
+  /**
+   * Which allow-listed runners may run here (ADR 0034). Defaults to the
+   * allow-list alone; a grant check plugs in here and can only narrow it.
+   */
+  gate?: RunnerGate;
 }
 
 export interface PassReport {
@@ -61,6 +77,8 @@ export interface PassReport {
   waiting?: Skipped[];
   /** Runs a previous worker left behind, settled before this pass started anything. */
   recovered?: Recovered[];
+  /** Undelivered run reports retried this pass, with what became of each. */
+  reported?: Reported[];
   /** Parents this agent holds that were completed or noted because of their subtasks. */
   rolledUp?: RolledUp[];
   /** Set when the pass stopped early because no run could start. */
@@ -86,12 +104,18 @@ export class Worker {
   private readonly log: (line: string) => void;
   private readonly now: () => number;
   private readonly budget: RunBudget;
+  /** The same limit counted across every worker process on this home. */
+  private readonly slots: HomeSlots;
   private readonly backoff: RetryBackoff;
+  /** The machine's runner grants, read afresh on every pass. */
+  private readonly grants: RunnerGrantStore;
   private readonly inFlight = new Map<string, ActiveRun>();
   /** Tasks already reported as waiting, so a pass every 30s does not repeat itself. */
   private readonly noted = new Set<string>();
   private policy: WorkerPolicy | undefined;
   private recovered = false;
+  /** Reports retried by `recover`, handed to the pass that follows it. */
+  private startupReports: Reported[] = [];
   private capabilitiesPublished = false;
   private abandoning = false;
 
@@ -108,6 +132,8 @@ export class Worker {
       this.now,
     );
     this.backoff = new RetryBackoff(options.home, this.now);
+    this.slots = new HomeSlots(options.home);
+    this.grants = RunnerGrantStore.forHome(options.home);
   }
 
   get running(): number {
@@ -155,7 +181,32 @@ export class Worker {
         .filter((at) => Number.isFinite(at) && at > cutoff),
     );
     this.recovered = true;
+    this.startupReports = await this.retryReports(policy);
     return recovered;
+  }
+
+  /**
+   * Publish results an earlier run could not (see `report.ts`), once each is due.
+   *
+   * Runs at start-up and at the head of every pass. A failure is logged by the
+   * retry itself and never stops the pass.
+   */
+  private async retryReports(policy: WorkerPolicy): Promise<Reported[]> {
+    const { backend, agentId, home } = this.options;
+    try {
+      return await reconcileReports({
+        backend,
+        agentId,
+        home,
+        log: this.log,
+        now: this.now,
+        exclude: new Set(this.inFlight.keys()),
+        onReleased: async (taskId) => await this.backoff.set(taskId, policy.retry.backoffMinutes),
+      });
+    } catch (error) {
+      this.log(`could not retry undelivered reports: ${describeError(error)}`);
+      return [];
+    }
   }
 
   /**
@@ -190,6 +241,8 @@ export class Worker {
       const recovered = await this.recover(policy);
       if (recovered.length > 0) report.recovered = recovered;
     }
+    const reported = [...this.startupReports.splice(0), ...(await this.retryReports(policy))];
+    if (reported.length > 0) report.reported = reported;
     await this.publishCapabilities(policy);
     await Promise.all([...this.inFlight.values()].map(async (run) => await run.check()));
 
@@ -198,6 +251,7 @@ export class Worker {
     const exclude = new Set([
       ...this.inFlight.keys(),
       ...(report.recovered ?? []).map((r) => r.taskId),
+      ...reported.map((r) => r.taskId),
     ]);
     // Asking with the worker's own capabilities is what makes capability work
     // `capable` and decides `ready` for every task that names requirements.
@@ -205,8 +259,26 @@ export class Worker {
       includeUnclaimed: false,
       ...(policy.capabilities.length === 0 ? {} : { includeCapable: policy.capabilities }),
     });
-    const { candidates, skipped, waiting } = selectCandidates(agenda, policy, exclude);
+    const {
+      candidates: selected,
+      skipped,
+      notices,
+      waiting,
+    } = selectCandidates(
+      agenda,
+      policy,
+      exclude,
+      ...(this.options.gate === undefined ? [] : [this.options.gate]),
+    );
+    // Runner grants (runner-grants.ts): a no-op until a person issues one.
+    const gate = this.gateContext(policy);
+    await requestMissingRunners(gate, agenda, skipped);
+    const { allowed: candidates, refused } = await gateCandidates(gate, selected);
+    skipped.push(...refused);
     for (const skip of skipped) this.note(skip.taskId, `skipping ${skip.taskId}: ${skip.reason}`);
+    // A task that runs anyway, with an `effort:` hint this machine refuses.
+    for (const notice of notices)
+      this.note(`effort:${notice.taskId}`, `${notice.taskId} ${notice.reason}`);
     report.skipped.push(...skipped.map(({ taskId, reason }) => ({ taskId, reason })));
     for (const wait of waiting) {
       this.note(`waiting:${wait.taskId}`, `${wait.taskId} not ready: ${wait.reason}`);
@@ -238,13 +310,27 @@ export class Worker {
         this.note(`limit:${blocker}`, `waiting: ${blocker}`);
         break;
       }
-      const claimed = await claimCandidate(
-        this.options.backend,
-        this.options.agentId,
-        candidate,
-        policy,
-      );
+      const reserved = await this.slots.reserve({ concurrency: policy.concurrency }, false);
+      if ("blocker" in reserved) {
+        report.limited = reserved.blocker;
+        this.note(`limit:${reserved.blocker}`, `waiting: ${reserved.blocker}`);
+        break;
+      }
+      const lease = reserved.lease;
+      let claimed: Awaited<ReturnType<typeof claimCandidate>>;
+      try {
+        claimed = await claimCandidate(
+          this.options.backend,
+          this.options.agentId,
+          candidate,
+          policy,
+        );
+      } catch (error) {
+        await lease.release();
+        throw error;
+      }
       if (!claimed.claimed) {
+        await lease.release();
         const line = `${candidate.taskId} ${claimed.reason}`;
         if (claimed.quiet) this.note(claimed.key, line);
         else this.log(line);
@@ -258,6 +344,7 @@ export class Worker {
       const [latest] = await taskRuns(this.options.home, candidate.taskId);
       this.begin(candidate, policy, claimed.attempt, {
         ranBefore: latest !== undefined,
+        lease,
         ...(latest === undefined ? {} : { since: latest.followupSince ?? latest.startedAt }),
       });
     }
@@ -293,6 +380,8 @@ export class Worker {
     options: {
       /** This agent ran the task before on this machine. */
       ranBefore: boolean;
+      /** The home-wide slot this run holds until it ends. */
+      lease: SlotLease;
       /**
        * Where the follow-up window starts, carried over from the task's last
        * run, so a person's message that arrived before this run is not lost.
@@ -303,12 +392,25 @@ export class Worker {
   ): void {
     const { ranBefore, followup } = options;
     const started = this.now();
+    const askedModel = runnerModel(candidate.argv);
+    const askedEffort = runnerEffort(candidate.argv);
     const record: RunRecord = {
       taskId: candidate.taskId,
       runId: newRunId(started),
       room: candidate.room,
       title: candidate.title,
       runner: candidate.runner,
+      // The runner's own argv is the only place the model and effort are
+      // known before the run starts. Both are recorded as requests; the run's
+      // output may separately report which model answered, and cannot make an
+      // unrequested model appear here.
+      ...(askedModel === undefined ? {} : { modelRequested: askedModel }),
+      ...(askedEffort === undefined ? {} : { effortRequested: askedEffort }),
+      ...(askedEffort === undefined || candidate.effortSource === undefined
+        ? {}
+        : { effortSource: candidate.effortSource }),
+      ...(candidate.tier === undefined ? {} : { tier: candidate.tier }),
+      ...(candidate.tierReason === undefined ? {} : { tierReason: candidate.tierReason }),
       startedAt: new Date(started).toISOString(),
       outcome: "running",
       workerPid: process.pid,
@@ -360,14 +462,72 @@ export class Worker {
       ranBefore,
       ...(followup === undefined ? {} : { followup }),
     })
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         this.log(`run ${candidate.taskId} crashed: ${describeError(error)}`);
+        await this.settleUnstarted(candidate, policy, record, error);
       })
-      .finally(() => {
+      .finally(async () => {
         this.budget.finish(isFollowup);
         this.inFlight.delete(candidate.taskId);
+        // `done` settles after this, so `idle` returns once the slot is free too.
+        await options.lease.release().catch(() => undefined);
       });
     this.inFlight.set(candidate.taskId, run);
+  }
+
+  /**
+   * Hand back a claim whose run never wrote a record.
+   *
+   * A run's first act is to write its `run.json`. Before that write succeeds
+   * there is no local evidence of the claim at all, and every recovery path
+   * reads records — so a run that dies there leaves the task `claimed` under
+   * this agent forever, reported in flight by every surface, and no restart
+   * or repaired directory settles it. The claim is the thing to settle, and
+   * it is settled exactly like an abandoned run: the same `abandonAction`
+   * decides release or block from `worker.onAbandon`, and a release takes the
+   * usual backoff so this machine does not immediately fail it again.
+   */
+  private async settleUnstarted(
+    candidate: Candidate,
+    policy: WorkerPolicy,
+    record: RunRecord,
+    error: unknown,
+  ): Promise<void> {
+    const { backend, agentId, home } = this.options;
+    try {
+      // The run reached its record after all: its own failure path reported
+      // the task, or the next start's recovery will. Settling here too would
+      // publish a second transition for one claim.
+      const settled = (await taskRuns(home, candidate.taskId)).some(
+        (run) => run.runId === record.runId,
+      );
+      if (settled) return;
+      const detail = await backend.call<TaskDetail>("taskShow", {
+        room: candidate.room,
+        taskId: candidate.taskId,
+      });
+      const action = abandonAction(detail.task, agentId, policy.onAbandon);
+      if (action === null) return;
+      const reason = describeError(error);
+      const body =
+        action === "released"
+          ? `Released by worker ${agentId}: its run could not start on this machine (${reason}). Another machine may take the task.`
+          : `Blocked by worker ${agentId}: its run could not start on this machine (${reason}). A person should look before it is run again.`;
+      await backend.call("taskUpdate", {
+        room: candidate.room,
+        taskId: candidate.taskId,
+        input: { action, body },
+      });
+      if (action === "released") {
+        await this.backoff.set(candidate.taskId, policy.retry.backoffMinutes);
+      }
+      this.log(`${candidate.taskId} ${action}: the run could not start`);
+    } catch (settleError) {
+      // Nothing else can be done from here; the log is the only trace.
+      this.log(
+        `${candidate.taskId} could not settle the claim after a run that never started: ${describeError(settleError)}`,
+      );
+    }
   }
 
   private host(): RunHost {
@@ -390,6 +550,7 @@ export class Worker {
       ...(this.options.liveIntervalMs === undefined
         ? {}
         : { liveIntervalMs: this.options.liveIntervalMs }),
+      ...(this.options.gate === undefined ? {} : { gate: this.options.gate }),
     };
   }
 
@@ -414,24 +575,52 @@ export class Worker {
       exclude: new Set([...exclude, ...this.inFlight.keys()]),
       now: this.now(),
       note: (key, line) => this.note(key, line),
+      ...(this.options.gate === undefined ? {} : { gate: this.options.gate }),
     });
     report.skipped.push(...skipped.map(({ taskId, reason }) => ({ taskId, reason })));
+    // A revoked grant refuses a follow-up too: it starts the same runner.
+    const gated = await gateCandidates(
+      this.gateContext(policy),
+      jobs.map((job) => job.candidate),
+    );
+    for (const refusal of gated.refused) {
+      this.note(
+        `skip:${refusal.taskId}`,
+        `skipping follow-up ${refusal.taskId}: ${refusal.reason}`,
+      );
+      report.skipped.push({ taskId: refusal.taskId, reason: refusal.reason });
+    }
     for (const { candidate, followup } of jobs) {
       if (this.abandoning) break;
+      if (!gated.allowed.includes(candidate)) continue;
       const blocker = this.budget.blocker(true);
       if (blocker !== null) {
         report.limited = blocker;
         this.note(`limit:${blocker}`, `follow-up waiting: ${blocker}`);
         break;
       }
-      const taken = await retakeTask(
-        this.options.backend,
-        this.options.agentId,
-        candidate,
-        followup.retake,
-        policy,
-      );
+      const reserved = await this.slots.reserve({ concurrency: policy.concurrency }, true);
+      if ("blocker" in reserved) {
+        report.limited = reserved.blocker;
+        this.note(`limit:${reserved.blocker}`, `follow-up waiting: ${reserved.blocker}`);
+        break;
+      }
+      const lease = reserved.lease;
+      let taken: Awaited<ReturnType<typeof retakeTask>>;
+      try {
+        taken = await retakeTask(
+          this.options.backend,
+          this.options.agentId,
+          candidate,
+          followup.retake,
+          policy,
+        );
+      } catch (error) {
+        await lease.release();
+        throw error;
+      }
       if (!taken.claimed) {
+        await lease.release();
         const line = `${candidate.taskId} follow-up ${taken.reason}`;
         if (taken.quiet) this.note(taken.key, line);
         else this.log(line);
@@ -443,10 +632,21 @@ export class Worker {
       (report.followups ??= []).push(candidate.taskId);
       this.begin(candidate, policy, taken.attempt, {
         ranBefore: true,
+        lease,
         since: followup.previous.followupSince ?? followup.previous.startedAt,
         followup,
       });
     }
+  }
+
+  private gateContext(policy: WorkerPolicy): GateContext {
+    return {
+      store: this.grants,
+      backend: this.options.backend,
+      agentId: this.options.agentId,
+      policy,
+      note: (key, line) => this.note(key, line),
+    };
   }
 
   private note(key: string, line: string): void {

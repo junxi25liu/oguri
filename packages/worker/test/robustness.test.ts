@@ -13,7 +13,13 @@ import type { Backend } from "@oguri/daemon";
 
 import { abandonAction, stopReason } from "../src/lifecycle.ts";
 import { pidExists } from "../src/process.ts";
-import { runExecutor, type Executor, type RunRequest, type RunResult } from "../src/runner.ts";
+import {
+  DRAIN_LIMIT_MS,
+  runExecutor,
+  type Executor,
+  type RunRequest,
+  type RunResult,
+} from "../src/runner.ts";
 import { listRuns, runDir, writeRunRecord, type RunRecord } from "../src/runs.ts";
 import { Worker } from "../src/worker.ts";
 
@@ -335,7 +341,10 @@ describe("crash recovery", () => {
     const { backend } = fakeBackend(agendaOf([]));
     const failing: Backend = {
       ...backend,
-      async call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+      async call<T>(
+        method: Parameters<Backend["call"]>[0],
+        params?: Record<string, unknown>,
+      ): Promise<T> {
         if (method === "taskShow") throw new Error("offline");
         return await backend.call<T>(method, params);
       },
@@ -470,13 +479,74 @@ describe("process groups", () => {
     }
   }
 
+  it("kills what a run that exits normally left running", async () => {
+    const pidFile = join(dir, "leak.pid");
+    const run = await runExecutor({
+      argv: ["sh", "-c", 'sleep 30 >/dev/null 2>&1 & echo $! > "$1"; exit 0', "sh", pidFile],
+      cwd: dir,
+      prompt: "",
+      timeoutMs: 10_000,
+      logDir: join(dir, "leak"),
+    });
+    assert.equal(run.exitCode, 0);
+    assert.equal(run.timedOut, false);
+    assert.equal(run.reapedBackground, 1, "the run says what it cleaned up");
+    await assertGone(await grandchildOf(pidFile));
+  });
+
+  it("does not call a run that finished a timeout because a background job holds stdout", async () => {
+    // The job inherits stdout, as `npm run dev &` would, so the pipe stays open
+    // after sh has exited with 0. The run is judged by sh, not by the pipe.
+    const started = Date.now();
+    const run = await runExecutor({
+      argv: ["sh", "-c", "sleep 60 & echo done; exit 0"],
+      cwd: dir,
+      prompt: "",
+      timeoutMs: 2_000,
+      logDir: join(dir, "hold"),
+    });
+    const took = Date.now() - started;
+    assert.equal(run.timedOut, false);
+    assert.equal(run.exitCode, 0);
+    assert.equal(run.reapedBackground, 1);
+    assert.match(run.stdoutTail, /done/);
+    assert.ok(took >= DRAIN_LIMIT_MS - 500, `the job gets its drain window (${String(took)}ms)`);
+    assert.ok(took <= DRAIN_LIMIT_MS + 3_000, `then it is stopped (${String(took)}ms)`);
+  });
+
+  it("reports nothing reaped when the run left nothing behind", async () => {
+    const run = await runExecutor({
+      argv: ["sh", "-c", "exit 0"],
+      cwd: dir,
+      prompt: "",
+      timeoutMs: 5_000,
+      logDir: join(dir, "clean"),
+    });
+    assert.equal(run.exitCode, 0);
+    assert.equal(run.reapedBackground, 0);
+  });
+
+  it("still reports a failing exit code from the executor itself", async () => {
+    const run = await runExecutor({
+      argv: ["sh", "-c", "exit 3"],
+      cwd: dir,
+      prompt: "",
+      timeoutMs: 5_000,
+      logDir: join(dir, "fails"),
+    });
+    assert.equal(run.exitCode, 3);
+    assert.equal(run.timedOut, false);
+  });
+
   it("kills the grandchildren of a run that times out", async () => {
     const pidFile = join(dir, "timeout.pid");
+    // The limit must outlast the shell starting up and writing the pid, which a loaded
+    // machine can take well over half a second to do.
     const run = await runExecutor({
       argv: grandparent(pidFile),
       cwd: dir,
       prompt: "",
-      timeoutMs: 500,
+      timeoutMs: 4_000,
       logDir: join(dir, "timeout"),
     });
     assert.equal(run.timedOut, true);
@@ -673,7 +743,11 @@ describe("workspace isolation", () => {
     await worker.pass();
     await worker.idle();
 
-    assert.equal(new Set(cwds).size, 2, "concurrent runs must not share a checkout");
+    assert.equal(
+      new Set(cwds).size,
+      2,
+      `both tasks must start in distinct checkouts; lifecycle evidence: ${JSON.stringify(updates())}`,
+    );
     const records = await listRuns(home);
     for (const record of records) {
       assert.equal(record.worktree?.path, join(runDir(home, record.taskId, record.runId), "work"));

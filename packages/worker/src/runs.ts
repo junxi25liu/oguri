@@ -33,6 +33,41 @@ export type RunOutcome =
   /** A follow-up on a task that stays completed failed; nothing was published to the task. */
   | "failed";
 
+/**
+ * A run's result that could not be published, held until it can be.
+ *
+ * Lives only in `run.json`, for as long as the record is `unreported`; the
+ * worker retries it on every pass and every start, and removes it once the
+ * task has heard it or no longer wants it.
+ */
+export interface PendingReport {
+  /** The task transition to publish, or `note` for an answer posted in the task's thread. */
+  action: "completed" | "blocked" | "released" | "progressed" | "note";
+  body: string;
+  refs: string[];
+  needsHuman: boolean;
+  /** Publications that failed so far, the first one included. */
+  attempts: number;
+  /** Not retried before this moment (ISO time). */
+  nextAt: string;
+  lastError?: string;
+  /** The short, output-free report tried once the full one has failed repeatedly. */
+  fallbackBody?: string;
+  /** `note` only: where the answer goes, and the outcome the run settles as. */
+  post?: { thread: string; inReplyTo: string; settleAs: "answered" | "failed" };
+  /** What the chat is told once the report is out, when the task came from a chat. */
+  relay?: {
+    room: string;
+    thread: string;
+    inReplyTo: string;
+    action: "completed" | "blocked" | "released" | "progressed";
+    summary?: string;
+    pr?: string;
+    question?: string;
+    failure?: string;
+  };
+}
+
 export interface RunRecord {
   taskId: string;
   /** Absent only on records written before per-run directories existed. */
@@ -45,9 +80,13 @@ export interface RunRecord {
   durationMs?: number;
   exitCode?: number | null;
   timedOut?: boolean;
+  /** Processes the executor left running that the runner stopped when the run ended; absent when none. */
+  reapedBackground?: number;
   outcome: RunOutcome;
   /** Why the outcome could not be reported, when it could not. */
   note?: string;
+  /** The report still to publish while the outcome is `unreported`. Absent on records older than R2. */
+  pendingReport?: PendingReport;
   /** The executor process, which leads its own process group. */
   pid?: number;
   /** When the executor started; bounds the start time of the process `pid` names. */
@@ -68,6 +107,56 @@ export interface RunRecord {
   origin?: string;
   /** The agent session the run reported, so a follow-up can resume it. */
   sessionId?: string;
+  /**
+   * The model the runner's argv asked for, when it named one.
+   *
+   * This is the request, not the outcome: a service may answer with another
+   * model, and `modelReported` records that separately. Keeping the two apart
+   * means the record never presents an intention as an observation.
+   */
+  modelRequested?: string;
+  /**
+   * The model the service's own output named, when it named one.
+   *
+   * Absent means the service did not say — not that it used the requested
+   * model. A cheap model behind an Anthropic-compatible endpoint reports usage
+   * but no model at all.
+   */
+  modelReported?: string;
+  /** Missing on legacy records: their model label has unverified provenance. */
+  modelSource?: "assistant-message" | "result-model" | "result-usage" | "cli-event";
+  modelInitialized?: string;
+  modelsUsage?: string[];
+  /**
+   * The effort level the runner's argv passed, when it passed one.
+   *
+   * Evidence of the request only. The services do not echo the level back, so
+   * nothing here says what was accepted or honoured.
+   */
+  effortRequested?: string;
+  /** The tier the task asked for when this run started (ADR 0034). */
+  tier?: string;
+  /** The task's `tier-reason:` line, as its requester wrote it. */
+  tierReason?: string;
+  /**
+   * Where this run's failure moved the task: the tier and runner the next try
+   * asks for. A request for the next run, not a record of what it used.
+   */
+  escalatedTo?: { tier: string; runner: string; step: number };
+  /**
+   * Who chose the effort in the argv: a person's follow-up with its own
+   * `effort:` line, the task's header, the task's tier, or the runner's policy.
+   * Like `effortRequested`, a request: nothing here says it was honoured.
+   */
+  effortSource?: "follow-up" | "task" | "tier" | "policy";
+  /**
+   * What the run reported it cost, in USD.
+   *
+   * Cumulative for a session: a resumed turn prints the total spent since the
+   * session began, not the price of that turn. `usage.ts` therefore counts a
+   * session once, so summing this field over every run would overcount.
+   */
+  costUsd?: number;
   /** The run answered a person's follow-up rather than starting the task. */
   followup?: boolean;
   /** The run continued an earlier session through the runner's `resume` argv. */

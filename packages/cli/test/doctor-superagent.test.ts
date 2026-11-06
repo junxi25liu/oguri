@@ -50,7 +50,7 @@ describe("doctor superagent checks", () => {
     // should not manufacture a complaint out of an unused section.
     const findings = await superagentFindings({
       policy: policyWith((p) => {
-        p.worker.runners.missing = { argv: ["definitely-not-a-command-xyz"], worktree: false };
+        p.worker.runners["missing"] = { argv: ["definitely-not-a-command-xyz"], worktree: false };
       }),
       home,
       pathEnv: "/usr/bin:/bin",
@@ -62,7 +62,7 @@ describe("doctor superagent checks", () => {
     const findings = await superagentFindings({
       policy: policyWith((p) => {
         p.superagent.big.enabled = true;
-        p.worker.runners.ghost = { argv: ["definitely-not-a-command-xyz"], worktree: false };
+        p.worker.runners["ghost"] = { argv: ["definitely-not-a-command-xyz"], worktree: false };
         p.superagent.big.runner = "ghost";
       }),
       home,
@@ -78,7 +78,7 @@ describe("doctor superagent checks", () => {
     const findings = await superagentFindings({
       policy: policyWith((p) => {
         p.superagent.small.enabled = true;
-        p.worker.runners.node = { argv: ["node", "-e", ""], worktree: false };
+        p.worker.runners["node"] = { argv: ["node", "-e", ""], worktree: false };
       }),
       home,
       pathEnv: `${join(tmp)}:${process.env["PATH"] ?? ""}`,
@@ -108,7 +108,7 @@ describe("doctor superagent checks", () => {
     // possible moment to find out. Only a role with no name is skipped.
     const findings = await superagentFindings({
       policy: policyWith((p) => {
-        p.worker.runners.present = { argv: ["node"], worktree: false };
+        p.worker.runners["present"] = { argv: ["node"], worktree: false };
         p.superagent.big.runner = "typo";
       }),
       home,
@@ -135,7 +135,7 @@ describe("doctor superagent checks", () => {
     await mkdir(plain, { recursive: true });
     const findings = await superagentFindings({
       policy: policyWith((p) => {
-        p.worker.runners.isolated = { argv: ["node"], worktree: true, workdir: plain };
+        p.worker.runners["isolated"] = { argv: ["node"], worktree: true, workdir: plain };
       }),
       home,
       pathEnv: process.env["PATH"] ?? "",
@@ -150,7 +150,7 @@ describe("doctor superagent checks", () => {
     await exec("git", ["init", "--quiet", repo]);
     const findings = await superagentFindings({
       policy: policyWith((p) => {
-        p.worker.runners.isolated = { argv: ["node"], worktree: true, workdir: repo };
+        p.worker.runners["isolated"] = { argv: ["node"], worktree: true, workdir: repo };
       }),
       home,
       pathEnv: process.env["PATH"] ?? "",

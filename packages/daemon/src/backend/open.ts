@@ -10,6 +10,7 @@ import { stat } from "node:fs/promises";
 import { DaemonClient } from "../client.ts";
 import { DaemonBackend } from "./daemon.ts";
 import { DirectBackend } from "./direct.ts";
+import { scopeToRun } from "./run-scope.ts";
 import type { Backend } from "./types.ts";
 
 export interface OpenBackendOptions {
@@ -75,7 +76,7 @@ export async function openBackend(options: OpenBackendOptions = {}): Promise<Bac
         if (options.session === true) {
           await client.openSession(environment, selectedNetwork).catch(() => undefined);
         }
-        return new DaemonBackend(client, selectedNetwork);
+        return scopeToRun(new DaemonBackend(client, selectedNetwork));
       }
       client.close();
     }
@@ -98,5 +99,5 @@ export async function openBackend(options: OpenBackendOptions = {}): Promise<Bac
   if (environment !== undefined) {
     await backend.publishConnectionProfile(environment).catch(() => undefined);
   }
-  return backend;
+  return scopeToRun(backend);
 }

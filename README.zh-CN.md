@@ -64,7 +64,7 @@
     </td>
     <td valign="top">
       <h4>按活选模型</h4>
-      用 Opus 做规划，用 DeepSeek 写代码。每个 runner 写一行 <code>model:</code>，Claude Code 和 Codex 都支持。
+      用强模型做规划，用便宜模型写代码。每个 runner 写一行 <code>model:</code>，Claude Code 和 Codex 都支持。
     </td>
   </tr>
   <tr>
@@ -85,14 +85,14 @@
 npm i -g oguri
 ```
 
-需要 Node 24 及以上和 Git 2.42 及以上。npm 包是一个自包含的文件，没有任何依赖。想从源码安装，见[不用 npm 安装](#不用-npm-安装)。
+需要 Node 24 及以上和 Git 2.42 及以上。npm 包是一个自包含的文件，没有任何依赖。想从源码安装，见[不用 npm 安装](#不用-npm-安装)。从零部署一台新机器（包括第二台），请按[部署指南](docs/zh-CN/deploy.md)走。
 
 ## 五分钟单机上手
 
 **1. 建一个传输仓库。** 新建一个空的私有仓库，比如 `acme/oguri-transport`。它只传消息，不放你的代码。
 
 ```console
-oguri init --repo git@github.com:acme/oguri-transport.git --agent liu-mac
+oguri init --repo git@github.com:acme/oguri-transport.git --agent alice-mac
 oguri daemon start
 ```
 
@@ -118,7 +118,7 @@ superagent:
   small: { enabled: true, maxWorkers: 3 }
 ```
 
-想要能中途插话的活会话 worker、用 Codex，或者换更便宜的模型？`oguri runner presets` 会打印现成的 runner 写法，直接粘进去就行。
+想要能中途插话的活会话 worker、用 Codex，或者换更便宜的模型？`oguri runner presets` 会打印现成的 runner 写法，直接粘进去就行。preset 里的模型名只是占位符，请换成你自己的 provider 提供的模型。想先用便宜模型、失败后再升到更强的，用 `worker.tiers` 给 runner 分档（[详情](docs/zh-CN/deploy.md#44-分档位先用便宜的失败再升档)）。
 
 **3. 启动，开始说话。**
 
@@ -129,7 +129,7 @@ oguri superagent status                      # 谁在跑、谁在等你、今天
 oguri web                                    # 同样的内容，网页版：http://127.0.0.1:7380
 ```
 
-`oguri doctor` 会检查整套配置：Git、守护进程、每个 runner 的命令，以及 superagent 的会话。
+`oguri doctor` 会检查整套配置：Git、守护进程、每个 runner 的命令，以及 superagent 的会话。单次运行默认最多 180 分钟（`worker.timeoutMinutes`，可设 1 到 1440）。
 
 ## 加第二台机器
 
@@ -148,7 +148,7 @@ worker:
   runners:
     claude: { argv: [claude, -p, --output-format, json], session: claude-json, worktree: true }
 superagent:
-  small: { enabled: true, big: liu-mac } # big superagent 的 agent id
+  small: { enabled: true, big: alice-mac } # big superagent 的 agent id
 ```
 
 ```console
@@ -221,7 +221,7 @@ flowchart LR
 - **仓库访问权限就是边界。** 只有能推送到传输仓库的机器才能参与。
 - **机器主人说了算。** worker、intake、superagent 和推送都配置在 `~/.oguri/policy.yaml`，任何消息都改变不了这个文件。
 - **由代码而不是模型决定接不接需求。** 群聊入口只接受名单里的人在配置的群里提的需求，其他人的消息只是上下文，不会变成指令。
-- **worker 被关在笼子里。** runner 是参数列表，不经过 shell。每次运行都有并发上限、每小时上限和超时，超时会结束整个进程组。worker 不能让 Big 再派 worker，也不能改写 agent 的公开介绍。
+- **worker 被关在笼子里。** runner 是参数列表，不经过 shell。每次运行都有并发上限、每小时上限和超时，超时会结束整个进程组。worker 不能让 Big 再派 worker，也不能改写 agent 的公开介绍，而且只能写自己的任务。开启 runner 授权后，runner 只有在本机终端前的人授权之后才会启动。
 - **密钥不进历史。** 消息、运行摘要、推送和群聊回复都经过密钥扫描，打印策略和状态时凭证一律隐去。
 
 连接敏感仓库前，请先读[SECURITY.md](SECURITY.md)。
@@ -243,11 +243,12 @@ ssh gpu-box ./install.sh --from-binary /tmp/oguri
 
 ## 文档
 
-| 文档                                  | 内容                                  |
-| ------------------------------------- | ------------------------------------- |
-| [用户指南](docs/zh-CN/guide.md)       | 每个功能的说明和可直接运行的命令      |
-| [快速上手](docs/zh-CN/quickstart.md)  | 传输仓库的选择、编辑器接入、FAQ、排错 |
-| [协议规范](spec/oguri-protocol-v1.md) | 其他实现可以遵循的磁盘格式（英文）    |
+| 文档                                  | 内容                                                   |
+| ------------------------------------- | ------------------------------------------------------ |
+| [部署指南](docs/zh-CN/deploy.md)      | 从零部署一台新机器：安装、策略、第二台机器、升级、排障 |
+| [用户指南](docs/zh-CN/guide.md)       | 每个功能的说明和可直接运行的命令                       |
+| [快速上手](docs/zh-CN/quickstart.md)  | 传输仓库的选择、编辑器接入、FAQ、排错                  |
+| [协议规范](spec/oguri-protocol-v1.md) | 其他实现可以遵循的磁盘格式（英文）                     |
 
 ## 开发
 

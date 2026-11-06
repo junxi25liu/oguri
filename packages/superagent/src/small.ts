@@ -13,7 +13,17 @@
  * Everything it writes is a message in the transport repository.
  */
 
-import { describeError, type Agenda, type SuperagentPolicy, type WorkerPolicy } from "@oguri/core";
+import {
+  allowListGate,
+  describeError,
+  parseTaskHeader,
+  resolveTier,
+  runnerAvailability,
+  type Agenda,
+  type RunnerGate,
+  type SuperagentPolicy,
+  type WorkerPolicy,
+} from "@oguri/core";
 import type { Backend } from "@oguri/daemon";
 import { machineMention, type Message } from "@oguri/protocol";
 
@@ -29,6 +39,7 @@ import {
   type Conversation,
 } from "./act.ts";
 import {
+  attemptsOf,
   batchConversation,
   batchesOf,
   thinkerOf,
@@ -66,6 +77,8 @@ export interface SmallReport {
   attention: SmallReportTask[];
   /** Reports written upward this pass. */
   reported: { taskId: string; reason: string }[];
+  /** Tasks addressed here whose tier or runner cannot run here, and why (ADR 0034). */
+  unrunnable: { taskId: string; reason: string }[];
   /** Messages from the owner handled this pass. */
   handled: { messageId: string; decision: Handled }[];
 }
@@ -79,6 +92,8 @@ export interface SmallOptions {
   /** Tasks this machine's worker engine has in flight. */
   running?: () => ReadonlySet<string>;
   ask?: AskModel;
+  /** Which runners may run here beyond the allow-list (ADR 0034); the worker uses the same. */
+  gate?: RunnerGate;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -91,6 +106,43 @@ export function attentionNote(task: SmallReportTask, machine: string): string {
     return `Small superagent on ${machine}: this worker is blocked and waiting.`;
   if (task.health === "stuck") return `Small superagent on ${machine}: this worker is stuck.`;
   return `Small superagent on ${machine}: no update from this worker for ${String(task.quietMinutes)} minutes.`;
+}
+
+/**
+ * Why this machine cannot run a task on the runner its header asks for, or
+ * undefined when it can (ADR 0034).
+ *
+ * The same check the worker makes before it claims, from the same core
+ * functions, so the small superagent can say why a task addressed here is not
+ * starting instead of leaving it to wait in silence. It never picks another
+ * runner: the requester chose that tier, and a swap would be invisible.
+ */
+export function tierProblem(
+  definition: string,
+  worker: Pick<WorkerPolicy, "runners" | "tiers">,
+  gate: RunnerGate = allowListGate,
+): string | undefined {
+  const header = parseTaskHeader(definition);
+  if (header.refusedTier !== undefined) return header.refusedTier;
+  if (header.tier !== undefined) {
+    const resolved = resolveTier(
+      worker,
+      {
+        tier: header.tier,
+        ...(header.runner === undefined ? {} : { runner: header.runner }),
+      },
+      gate,
+    );
+    return "error" in resolved ? resolved.error : undefined;
+  }
+  if (header.runner === undefined) return undefined;
+  const available = runnerAvailability(worker, header.runner, gate);
+  return available.ok ? undefined : available.reason;
+}
+
+/** The note for a task whose tier cannot run here. */
+export function tierNote(machine: string, problem: string): string {
+  return `Small superagent on ${machine}: this task will not run here: ${problem}. It was not moved to another runner.`;
 }
 
 /** A message the owner wrote to this small superagent. */
@@ -150,6 +202,7 @@ export class SmallSuperagent {
       running: [],
       attention: [],
       reported: [],
+      unrunnable: [],
       handled: [],
     };
     if (!policy.enabled) {
@@ -159,7 +212,7 @@ export class SmallSuperagent {
     const state = await readSuperagentState(this.options.home, "small", now);
     try {
       await this.join(superagent);
-      await this.watch(policy, state, report);
+      await this.watch(policy, worker, state, report);
       if (policy.talk) await this.talk(superagent, worker, state, report, signal);
     } finally {
       await writeSuperagentState(this.options.home, "small", state);
@@ -187,6 +240,7 @@ export class SmallSuperagent {
   /** Report the workers this machine holds that need a look. */
   private async watch(
     policy: SuperagentPolicy["small"],
+    worker: WorkerPolicy,
     state: SuperagentState,
     report: SmallReport,
   ): Promise<void> {
@@ -195,8 +249,51 @@ export class SmallSuperagent {
     const agenda = await backend.call<Agenda>("agenda", { includeUnclaimed: false });
     const running = this.options.running?.() ?? new Set<string>();
     const held = new Set<string>();
+    const note = async (
+      room: string,
+      thread: string,
+      inReplyTo: string,
+      body: string,
+      tag: string,
+    ): Promise<void> => {
+      await backend.call("send", {
+        room,
+        input: {
+          body,
+          kind: "msg",
+          needs: "none",
+          thread,
+          inReplyTo,
+          tags: [SMALL_REPORT_TAG, tag],
+        },
+      });
+    };
     for (const entry of agenda.entries) {
       const status = entry.status;
+      // A task offered here that has not started: check, before the worker
+      // would, that the runner it asks for can run here (ADR 0034).
+      if (entry.relation === "offered" && status.task.state === "open") {
+        held.add(status.task.id);
+        const problem = tierProblem(status.definition, worker, this.options.gate);
+        if (problem === undefined) continue;
+        report.unrunnable.push({ taskId: status.task.id, reason: problem });
+        const key = `${status.task.id}:tier`;
+        if (state.noted[key] !== undefined) continue;
+        try {
+          await note(
+            entry.room,
+            status.thread,
+            status.currentMessageId,
+            tierNote(machine, problem),
+            "superagent-tier",
+          );
+          state.noted[key] = now;
+          report.reported.push({ taskId: status.task.id, reason: "tier" });
+        } catch (error) {
+          this.log(`could not report ${status.task.id}: ${describeError(error)}`);
+        }
+        continue;
+      }
       if (status.task.assignee !== agentId) continue;
       if (status.task.state === "completed" || status.task.state === "cancelled") continue;
       held.add(status.task.id);
@@ -225,17 +322,13 @@ export class SmallSuperagent {
         reason === "quiet" ? now - lastAt >= policy.reportEveryMinutes * 60_000 : lastAt === 0;
       if (!due) continue;
       try {
-        await backend.call("send", {
-          room: entry.room,
-          input: {
-            body: attentionNote(row, machine),
-            kind: "msg",
-            needs: "none",
-            thread: status.thread,
-            inReplyTo: status.currentMessageId,
-            tags: [SMALL_REPORT_TAG, `superagent-${reason}`],
-          },
-        });
+        await note(
+          entry.room,
+          status.thread,
+          status.currentMessageId,
+          attentionNote(row, machine),
+          `superagent-${reason}`,
+        );
         state.noted[key] = now;
         report.reported.push({ taskId: status.task.id, reason });
       } catch (error) {
@@ -286,6 +379,7 @@ export class SmallSuperagent {
         ...(superagent.small.runner === undefined ? {} : { runner: superagent.small.runner }),
         ...(this.options.ask === undefined ? {} : { ask: this.options.ask }),
         ...(mind === undefined ? {} : { mind }),
+        ...(this.options.gate === undefined ? {} : { gate: this.options.gate }),
         ...(signal === undefined ? {} : { signal }),
       });
       if (decided.decision === null && decided.retry === true) {
@@ -318,6 +412,7 @@ export class SmallSuperagent {
             agentId,
             policy: superagent,
             defaultTarget: machineMention(machine),
+            ...attemptsOf(worker),
             log: this.log,
           },
           conversation,

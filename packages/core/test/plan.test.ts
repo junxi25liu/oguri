@@ -247,6 +247,18 @@ describe("createPlanTasks", () => {
     assert.equal(write?.maxAttempts, 2);
   });
 
+  it("attaches the steps under an existing task, writing and claiming no new parent", async () => {
+    const { writer, created, claims } = fakeWriter();
+    const parent = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    const result = await createPlanTasks(writer, "ops", validatePlan(GOOD), { parent });
+    assert.equal(created.length, 3, "only the steps");
+    assert.deepEqual(claims, [], "the run already holds its task");
+    assert.ok(created.every((entry) => entry.input.parent === parent));
+    assert.deepEqual(created[1]?.input.dependsOn, ["ID0"]);
+    assert.equal(result.attached, true);
+    assert.equal(result.parent.id, parent);
+  });
+
   it("carries on when the parent claim is refused", async () => {
     const { writer, created } = fakeWriter({ refuseClaim: true });
     const result = await createPlanTasks(writer, "ops", validatePlan(GOOD));

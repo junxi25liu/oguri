@@ -144,7 +144,7 @@ before(async () => {
   bigHome = join(tmp, "big-home");
   await exec("git", ["init", "--bare", "--quiet", "--initial-branch=main", remote]);
   await oguri(home, "init", "--repo", remote, "--network", "acme", "--agent", "coding-agent");
-  await oguri(bigHome, "init", "--repo", remote, "--network", "acme", "--agent", "liu-big");
+  await oguri(bigHome, "init", "--repo", remote, "--network", "acme", "--agent", "alice-big");
   // A conversation room configured on both machines, and Big enabled on the
   // machine that answers. The policy is machine-local; this test writes it
   // into a temp home, never the repository's policy file.
@@ -210,11 +210,11 @@ describe("oguri_big", () => {
   });
 
   it("reads empty replies before Big answers, then only Big's replies in that thread", async () => {
-    const first = await client.call<{ thread: string }>("oguri_big", {
+    const first = await client.call<{ thread: string; sent: string }>("oguri_big", {
       action: "send",
       body: "How many workers are running?",
     });
-    const second = await client.call<{ thread: string }>("oguri_big", {
+    const second = await client.call<{ thread: string; sent: string }>("oguri_big", {
       action: "send",
       body: "And what did they cost?",
     });
@@ -272,7 +272,7 @@ describe("oguri_big", () => {
     assert.equal(afterReply.value.thread, first.value.thread);
     assert.equal(afterReply.value.messages.length, 2, "request + Big's reply");
     assert.equal(afterReply.value.replies.length, 1, "only Big's message is a reply");
-    assert.equal(afterReply.value.replies[0]?.from, "liu-big");
+    assert.equal(afterReply.value.replies[0]?.from, "alice-big");
     assert.match(afterReply.value.replies[0]?.body ?? "", /Two workers are running/);
     assert.equal(afterReply.value.replies[0]?.role, "big");
     assert.equal(afterReply.value.replies[0]?.inReplyTo, first.value.sent);

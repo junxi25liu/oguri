@@ -1,6 +1,6 @@
 {
   "name": "@oguri/core",
-  "version": "1.0.1",
+  "version": "1.0.5",
   "description": "oguri engine: git transport, room store, collaborative tasks, change detection, outbox, and the secret scanner.",
   "license": "MIT",
   "type": "module",

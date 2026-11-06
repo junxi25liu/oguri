@@ -540,6 +540,102 @@ describe("oguri CLI, end to end", () => {
     assert.equal(status?.stale, false);
   });
 
+  it("changes an unclaimed task's dependencies from the CLI, and refuses it once claimed", async () => {
+    const make = async (title: string, ...extra: string[]) =>
+      parseJson<{ task: { id: string } }>(
+        await alice(
+          "task",
+          "create",
+          "architecture",
+          `${title} definition.`,
+          "--title",
+          title,
+          "--json",
+          ...extra,
+        ),
+      ).task.id;
+    const doomed = await make("Doomed prerequisite");
+    const kept = await make("Kept prerequisite");
+    const waiting = await make(
+      "Waits on two",
+      "--depends-on",
+      doomed,
+      "--depends-on",
+      kept,
+      "--target",
+      "bob-codex",
+    );
+    assert.equal(
+      (await alice("task", "update", "architecture", doomed, "cancelled", "Not needed.")).code,
+      0,
+    );
+
+    const relink = (...args: string[]) =>
+      alice("task", "update", "architecture", waiting, "relinked", ...args);
+
+    // The flags are checked before anything is sent.
+    const lone = await relink("Nothing to change.");
+    assert.notEqual(lone.code, 0);
+    assert.match(lone.stderr, /at least one dependency/);
+    const typo = await relink("Bad id.", "--remove-depends-on", "nope");
+    assert.notEqual(typo.code, 0);
+    assert.match(typo.stderr, /must be a task id/);
+    const stray = await alice(
+      "task",
+      "update",
+      "architecture",
+      waiting,
+      "refined",
+      "Wrong action.",
+      "--remove-depends-on",
+      doomed,
+    );
+    assert.notEqual(stray.code, 0);
+    assert.match(stray.stderr, /apply only to the 'relinked' action/);
+
+    const done = parseJson<{ task: { state: string; action: string; dependsOn: string[] } }>(
+      await relink("Dropping the cancelled prerequisite.", "--remove-depends-on", doomed, "--json"),
+    );
+    assert.equal(done.task.action, "relinked");
+    assert.equal(done.task.state, "open");
+    assert.deepEqual(done.task.dependsOn, [kept]);
+
+    // The audit trail is in the task's history.
+    const shown = parseJson<{ events: { action: string; from: string; body: string }[] }>(
+      await alice("task", "show", "architecture", waiting, "--json"),
+    );
+    const last = shown.events.at(-1);
+    assert.equal(last?.action, "relinked");
+    assert.equal(last?.from, "alice-cursor");
+    assert.match(last?.body ?? "", /Dropping the cancelled prerequisite/);
+
+    // Re-adding a dependency it already has is refused rather than ignored.
+    const twice = await relink("Again.", "--add-depends-on", kept);
+    assert.notEqual(twice.code, 0);
+    assert.match(twice.stderr, /already a dependency/);
+
+    // Once the work has been claimed, the dependencies are fixed.
+    const none = parseJson<{ task: { dependsOn?: string[] } }>(
+      await relink("Nothing left to wait for.", "--remove-depends-on", kept, "--json"),
+    );
+    assert.equal(none.task.dependsOn, undefined);
+    await bob("sync");
+    assert.equal((await bob("task", "approve", "architecture", waiting)).code, 0);
+    const claim = await bob("task", "claim", "architecture", waiting, "Taking it.");
+    assert.equal(claim.code, 0, claim.stderr);
+    await alice("sync");
+    const late = await relink("Too late.", "--add-depends-on", kept);
+    assert.notEqual(late.code, 0);
+    assert.match(late.stderr, /only while the task is open/);
+
+    // Leave nothing in flight: later cases count bob's unfinished work.
+    assert.equal((await bob("task", "update", "architecture", waiting, "started", "Go.")).code, 0);
+    assert.equal(
+      (await bob("task", "update", "architecture", waiting, "completed", "Done.")).code,
+      0,
+    );
+  });
+
   it("reconstructs one task in full, so work can be resumed by another session", async () => {
     const created = parseJson<{ task: { id: string } }>(
       await alice(

@@ -4,7 +4,9 @@ Get two AI coding agents talking to each other through a git repository you own,
 them useful day to day.
 
 This is the task-oriented guide: what to type, what each use case looks like end to end, and
-what to do when something is wrong. For _why_ it is built this way, see the README.
+what to do when something is wrong. For _why_ it is built this way, see the README. To put
+oguri on a new machine and have workers and superagents take work, follow the
+[deployment guide](deploy.md).
 
 ---
 
@@ -62,7 +64,9 @@ oguri inbox
 architecture  alice-cursor  needs:none  Refund retries now own idempotency keys.
 ```
 
-That is the whole system. Everything below is variations on it.
+That is the whole system. Everything below is variations on it. Next: let a machine run the work
+it is sent (a worker), and talk to one agent that runs all your machines (the superagents). Both
+are set up step by step in the [deployment guide](deploy.md#4-configure-policy).
 
 ---
 
@@ -519,6 +523,7 @@ oguri doctor
 
 | Symptom                                                              | Cause and fix                                                                                                                         |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `daemon did not come up within 4s`                                   | See `~/.oguri/logs/daemon.log`. A very long `OGURI_HOME` also breaks it: unix socket paths must stay under about 100 bytes.           |
 | `! [remote rejected] main -> main (branch is currently checked out)` | The transport is not bare. `git clone --bare <repo> <transport>.git` and re-init.                                                     |
 | `oguri is not configured`                                            | No network on this machine (or wrong `$OGURI_HOME`). Run `oguri init --repo <url>`.                                                   |
 | Messages sent but nobody sees them                                   | Check `oguri status` for queued work and `oguri doctor` for remote reachability. Sends queue silently when the remote is unreachable. |
@@ -531,4 +536,5 @@ oguri doctor
 ---
 
 Before you use this with anything sensitive, read [SECURITY.md](../SECURITY.md) for the threat
-model.
+model. More troubleshooting for workers, superagents, tiers and runner grants is in the
+[deployment guide](deploy.md#10-troubleshooting).

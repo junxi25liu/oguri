@@ -1,6 +1,6 @@
 {
   "name": "oguri",
-  "version": "1.0.1",
+  "version": "1.0.5",
   "description": "Talk to one agent. It runs every machine you own: superagents for Claude Code and Codex, over a Git repository you own.",
   "license": "MIT",
   "//mcpName": "Ownership proof for the official MCP Registry: it verifies this npm package by matching this field against `name` in server.json. Must stay io.github.<github-owner>/<server-name>.",

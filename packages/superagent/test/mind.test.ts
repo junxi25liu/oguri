@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import {
-  MAX_SESSION_TURNS,
   OneShotMind,
   ResumeMind,
   SessionStore,
@@ -149,9 +148,10 @@ describe("a resumed session (claude-json)", () => {
     );
   });
 
-  it("starts afresh after its turn limit", async () => {
+  it("continues the same session regardless of its turn count", async () => {
+    const log = join(tmp, "json-long-session.jsonl");
+    process.env["CALLS"] = log;
     const store = new SessionStore(join(tmp, "big-session-3.json"));
-    await store.write({ id: "old", rules: rulesHash(RULES), turns: MAX_SESSION_TURNS });
     const runner = {
       name: "brain",
       argv: [process.execPath, jsonScript],
@@ -159,7 +159,22 @@ describe("a resumed session (claude-json)", () => {
       session: "claude-json" as const,
       cwd: tmp,
     };
-    assert.equal(await new ResumeMind(runner, store).primed(RULES), false);
+    const startedAt = "2026-11-04T00:00:00.000Z";
+    for (const turns of [59, 60, 120, 10_000]) {
+      await store.write({ id: "old", rules: rulesHash(RULES), turns, startedAt });
+      const mind = new ResumeMind(runner, store);
+      assert.equal(await mind.primed(RULES), true);
+      const result = await mind.turn({ rules: RULES, turn: "NEXT", timeoutMs: 10_000 });
+      assert.equal(result.ok, true);
+      const record = await store.read();
+      assert.equal(record.id, "old");
+      assert.equal(record.turns, turns + 1);
+      assert.equal(record.startedAt, startedAt);
+    }
+    const seen = await calls(log);
+    assert.equal(seen.length, 4);
+    assert.ok(seen.every((call) => call["resumed"] === true && call["id"] === "old"));
+    assert.ok(seen.every((call) => call["prompt"] === "NEXT"));
   });
 
   it("reads a session id from claude and codex output", () => {
@@ -193,24 +208,72 @@ describe("a session kept up (claude-stream)", () => {
     };
     const path = join(tmp, "stream-session.json");
     const mind = new StreamMind(runner, new SessionStore(path));
-    for (const turn of ["T1", "T2", "T3"]) {
+    const turnNames = Array.from({ length: 65 }, (_, index) => `T${index + 1}`);
+    for (const turn of turnNames) {
       const result = await mind.turn({ rules: RULES, turn, timeoutMs: 10_000 });
       assert.equal(result.ok, true);
     }
+    assert.equal((await new SessionStore(path).read()).turns, 65);
     await mind.close();
     const again = new StreamMind(runner, new SessionStore(path));
     assert.equal(await again.primed(RULES), true);
-    await again.turn({ rules: RULES, turn: "T4", timeoutMs: 10_000 });
+    await again.turn({ rules: RULES, turn: "T66", timeoutMs: 10_000 });
     await again.close();
 
     const seen = await calls(log);
     const spawns = seen.filter((call) => call["spawn"] === true);
-    assert.equal(spawns.length, 2, "one process for three turns, one more after the restart");
+    assert.equal(spawns.length, 2, "one process for 65 turns, one more after the restart");
     assert.equal(spawns[1]?.["resumed"], true);
     assert.equal(spawns[1]?.["id"], spawns[0]?.["id"]);
     const turns = seen.filter((call) => call["turn"] !== undefined).map((call) => call["turn"]);
     assert.match(String(turns[0]), /^You are the big superagent/, "the first turn has the rules");
-    assert.deepEqual(turns.slice(1), ["T2", "T3", "T4"]);
+    assert.deepEqual(turns.slice(1), [...turnNames.slice(1), "T66"]);
+  });
+
+  it("resumes a long session and still starts afresh when standing rules change", async () => {
+    const log = join(tmp, "stream-long-session.jsonl");
+    process.env["CALLS"] = log;
+    const runner = {
+      name: "brain",
+      argv: [process.execPath, streamScript],
+      resume: [process.execPath, streamScript, "--resume", "{session}"],
+      session: "claude-stream" as const,
+      cwd: tmp,
+    };
+    const store = new SessionStore(join(tmp, "stream-long-session.json"));
+    const startedAt = "2026-11-04T00:00:00.000Z";
+    await store.write({ id: "long-lived", rules: rulesHash(RULES), turns: 10_000, startedAt });
+    const mind = new StreamMind(runner, store);
+    try {
+      assert.equal(await mind.primed(RULES), true);
+      const resumed = await mind.turn({ rules: RULES, turn: "A", timeoutMs: 10_000 });
+      assert.equal(resumed.ok, true);
+      assert.deepEqual(await store.read(), {
+        id: "long-lived",
+        rules: rulesHash(RULES),
+        turns: 10_001,
+        startedAt,
+      });
+      const changed = await mind.turn({ rules: "RULES-V2", turn: "B", timeoutMs: 10_000 });
+      assert.equal(changed.ok, true);
+      const record = await store.read();
+      assert.notEqual(record.id, "long-lived");
+      assert.equal(record.rules, rulesHash("RULES-V2"));
+      assert.equal(record.turns, 1);
+    } finally {
+      await mind.close();
+    }
+    const seen = await calls(log);
+    const spawns = seen.filter((call) => call["spawn"] === true);
+    assert.equal(spawns.length, 2);
+    assert.deepEqual(
+      spawns.map((call) => call["resumed"]),
+      [true, false],
+    );
+    assert.deepEqual(
+      seen.filter((call) => call["turn"] !== undefined).map((call) => call["turn"]),
+      ["A", "RULES-V2\n\nB"],
+    );
   });
 
   it("gives up on a turn that never answers, and starts again on the next", async () => {

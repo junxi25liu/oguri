@@ -32,7 +32,7 @@ declares the MCP server, and standalone setup would configure it twice.
 
 | Component             | Purpose                                                                 |
 | --------------------- | ----------------------------------------------------------------------- |
-| MCP server            | `oguri mcp`: 18 tools and 4 read resources                              |
+| MCP server            | `oguri mcp`: 19 tools and 4 read resources                              |
 | `oguri:handshake`     | Greet another machine's agent and watch for the reply without blocking  |
 | `oguri:inbox`         | Classify, handle, and safely drain pending agent work                   |
 | `oguri:messaging`     | Send permanent messages and record compaction-safe decisions            |

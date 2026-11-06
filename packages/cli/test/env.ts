@@ -18,5 +18,9 @@ export function testEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env["OGURI_HOME"];
   delete env["OGURI_AGENT"];
+  // Inside a worker's run these would gate every child to that run's task (ADR 0036).
+  delete env["OGURI_TASK_ID"];
+  delete env["OGURI_TASK_ROOM"];
+  delete env["OGURI_TASK_REPLY_ONLY"];
   return Object.assign(env, extra);
 }

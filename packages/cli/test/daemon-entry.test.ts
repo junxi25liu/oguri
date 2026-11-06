@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { daemonEntryFor } from "../src/daemon-cmd.ts";
+import { SOCKET_PATH_MAX_BYTES, daemonEntryFor, socketPathProblem } from "../src/daemon-cmd.ts";
 
 /**
  * Regression coverage for an install-breaking bug.
@@ -18,10 +18,10 @@ import { daemonEntryFor } from "../src/daemon-cmd.ts";
  */
 describe("daemon entry resolution", () => {
   it("runs the packaged binary as its own daemon host", () => {
-    const entry = daemonEntryFor("/Users/someone/.local/bin/oguri", undefined, null);
+    const entry = daemonEntryFor("/home/user/.local/bin/oguri", undefined, null);
 
     assert.deepEqual(entry, {
-      command: "/Users/someone/.local/bin/oguri",
+      command: "/home/user/.local/bin/oguri",
       args: ["daemon", "run"],
     });
     assert.notEqual(
@@ -68,5 +68,24 @@ describe("daemon entry resolution", () => {
       "daemon",
       "a packaged Windows binary must host the daemon itself too",
     );
+  });
+});
+
+describe("daemon socket path length", () => {
+  it("accepts a short path", () => {
+    assert.equal(socketPathProblem("/home/user/.oguri/daemon.sock"), null);
+  });
+
+  it("names the real cause for a path the kernel cannot bind", () => {
+    const long = `/home/user/${"a".repeat(SOCKET_PATH_MAX_BYTES)}/daemon.sock`;
+    const message = socketPathProblem(long) ?? "";
+    assert.match(message, /socket path is \d+ bytes/);
+    assert.match(message, /shorter OGURI_HOME/);
+  });
+
+  it("counts bytes, not characters", () => {
+    const wide = `/home/user/${"路".repeat(Math.ceil(SOCKET_PATH_MAX_BYTES / 3))}/daemon.sock`;
+    assert.ok(wide.length < SOCKET_PATH_MAX_BYTES);
+    assert.notEqual(socketPathProblem(wide), null);
   });
 });

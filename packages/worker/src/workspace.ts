@@ -15,6 +15,7 @@
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
@@ -64,19 +65,52 @@ export async function prepareWorkspace(options: {
   const path = join(options.runDir, "work");
   const branch = worktreeBranch(options.taskId, options.runId);
   try {
-    await exec("git", [
-      "-C",
-      options.workdir,
-      "worktree",
-      "add",
-      "--quiet",
-      "-b",
-      branch,
-      path,
-      "HEAD",
-    ]);
+    await addWorktree(options.workdir, branch, path);
   } catch (error) {
     throw new Error(`could not create a git worktree of ${options.workdir}: ${gitError(error)}`);
   }
   return { cwd: path, worktree: { path, branch } };
+}
+
+/** Worktree creations in this process, one queue per repository. */
+const queues = new Map<string, Promise<unknown>>();
+
+/**
+ * `git worktree add` reads every sibling worktree's admin directory while it
+ * writes its own, so two overlapping calls on one repository can fail with
+ * "failed to read .git/worktrees/<name>/commondir" (git 2.50 on macOS, 2 of 1920
+ * at 32-way, 1 in ~100 rounds of 64). Runs of one worker share a repository by
+ * design, so creation is serialised here; another process on the same
+ * repository can still collide, which the retry below absorbs.
+ */
+async function addWorktree(workdir: string, branch: string, path: string): Promise<void> {
+  const previous = queues.get(workdir) ?? Promise.resolve();
+  const turn = previous.then(
+    async () => await addWithRetry(workdir, branch, path),
+    async () => await addWithRetry(workdir, branch, path),
+  );
+  queues.set(workdir, turn);
+  try {
+    await turn;
+  } finally {
+    if (queues.get(workdir) === turn) queues.delete(workdir);
+  }
+}
+
+const TRANSIENT = /failed to read .*commondir/;
+const ATTEMPTS = 4;
+
+async function addWithRetry(workdir: string, branch: string, path: string): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    // The failed attempt may have created the branch, which belongs to this run
+    // alone, so a retry resets it rather than refusing it as already existing.
+    const flag = attempt === 1 ? "-b" : "-B";
+    try {
+      await exec("git", ["-C", workdir, "worktree", "add", "--quiet", flag, branch, path, "HEAD"]);
+      return;
+    } catch (error) {
+      if (attempt >= ATTEMPTS || !TRANSIENT.test(gitError(error))) throw error;
+      await sleep(50 * attempt + Math.floor(Math.random() * 50));
+    }
+  }
 }

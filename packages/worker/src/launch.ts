@@ -11,11 +11,25 @@
 
 import { stat } from "node:fs/promises";
 
+import type { TaskDetail } from "@oguri/core";
+import type { Backend } from "@oguri/daemon";
+
 import type { Followup } from "./followup.ts";
-import { allowedShellCommands, buildStdin, conversationText, resumeText } from "./prompt.ts";
+import {
+  allowedShellCommands,
+  buildStdin,
+  contextSection,
+  conversationText,
+  resumeText,
+  type ContextDependency,
+  type ContextParent,
+} from "./prompt.ts";
 import type { Candidate } from "./select.ts";
 import { resumeArgv } from "./session.ts";
 import type { Workspace } from "./workspace.ts";
+
+/** Dependencies read for the Context section; more than this are named by pointer only. */
+const MAX_DEPENDENCIES_READ = 16;
 
 export interface LaunchPlan {
   argv: string[];
@@ -34,26 +48,82 @@ export async function isDirectory(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * The Context section for a task with a parent or dependencies: empty for any
+ * other, and for one whose neighbours cannot be read, a pointer rather than a
+ * failed launch.
+ */
+export async function loadContext(backend: Backend, candidate: Candidate): Promise<string> {
+  if (candidate.parent === undefined && (candidate.dependsOn ?? []).length === 0) return "";
+  const show = async (taskId: string): Promise<TaskDetail | undefined> => {
+    try {
+      return await backend.call<TaskDetail>("taskShow", { room: candidate.room, taskId });
+    } catch {
+      return undefined;
+    }
+  };
+
+  let parent: ContextParent | undefined;
+  if (candidate.parent !== undefined) {
+    const detail = await show(candidate.parent);
+    parent =
+      detail === undefined
+        ? { id: candidate.parent, title: "", body: "", unread: true }
+        : { id: detail.task.id, title: detail.task.title, body: detail.definition };
+  }
+
+  const dependencies: ContextDependency[] = [];
+  const ids = candidate.dependsOn ?? [];
+  for (const [index, id] of ids.entries()) {
+    if (index >= MAX_DEPENDENCIES_READ) {
+      dependencies.push({ id, title: "", summary: "", refs: [], unread: true });
+      continue;
+    }
+    const detail = await show(id);
+    if (detail === undefined) {
+      dependencies.push({ id, title: "", summary: "", refs: [], unread: true });
+      continue;
+    }
+    if (detail.task.state !== "completed") continue;
+    const completion = [...detail.events].reverse().find((event) => event.action === "completed");
+    dependencies.push({
+      id,
+      title: detail.task.title,
+      summary: completion?.body ?? "",
+      refs: completion?.refs ?? [],
+    });
+  }
+  return contextSection({ ...(parent === undefined ? {} : { parent }), dependencies });
+}
+
 export async function planLaunch(input: {
   candidate: Candidate;
   followup?: Followup;
   /** This agent ran the task before on this machine: retry, recovery, or follow-up. */
   ranBefore: boolean;
   resultFile: string;
+  /** The runner requires `result.json`. */
+  resultRequired?: boolean;
   exists?: (path: string) => Promise<boolean>;
   /** The run will have oguri's tools. */
   tools?: boolean;
+  /** Where the parent and dependencies are read from; without it, no Context section. */
+  backend?: Backend;
 }): Promise<LaunchPlan> {
   const { candidate, followup } = input;
   const exists = input.exists ?? isDirectory;
-  const stdin = (text: string): string =>
+  // A resumed session was given this when it began; only a cold start needs it.
+  const context = input.backend === undefined ? "" : await loadContext(input.backend, candidate);
+  const stdin = (text: string, withContext = true): string =>
     buildStdin({
       text,
       resultFile: input.resultFile,
+      ...(input.resultRequired === true ? { resultRequired: true } : {}),
       ranBefore: input.ranBefore,
       ...(candidate.origin === undefined ? {} : { origin: candidate.origin }),
       ...(input.tools === true ? { tools: true } : {}),
       shell: allowedShellCommands(candidate.argv),
+      ...(withContext && context !== "" ? { context } : {}),
     });
   if (followup === undefined) {
     return { argv: [...candidate.argv], stdin: stdin(candidate.prompt), resumed: false };
@@ -71,7 +141,7 @@ export async function planLaunch(input: {
   if (reuse !== undefined && sessionId !== undefined && candidate.resume !== undefined) {
     return {
       argv: resumeArgv(candidate.resume, sessionId),
-      stdin: stdin(resumeText(followup.messages)),
+      stdin: stdin(resumeText(followup.messages), false),
       resumed: true,
       reuse,
     };

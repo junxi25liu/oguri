@@ -5,6 +5,7 @@ import { Layout, describeError } from "@oguri/core";
 import { cmdAgent, cmdAgents, cmdProfile } from "./commands/agents.ts";
 import { cmdApprovals, cmdPolicy } from "./commands/approvals.ts";
 import { cmdClaim, cmdClaims } from "./commands/claims.ts";
+import { cmdChat } from "./commands/chat.ts";
 import { cmdDaemon } from "./commands/daemon.ts";
 import { cmdDoctor } from "./commands/doctor.ts";
 import { cmdHandshake } from "./commands/handshake.ts";
@@ -45,7 +46,7 @@ import { OPTIONS } from "./options.ts";
 import { errline, out, red } from "./output.ts";
 import { reportError } from "./report-error.ts";
 
-export const VERSION = "1.0.1";
+export const VERSION = "1.0.5";
 
 type Handler = (ctx: Ctx) => Promise<number>;
 
@@ -77,6 +78,7 @@ const COMMANDS: Readonly<Record<string, Handler>> = {
   superagent: cmdSuperagent,
   big: cmdBig,
   small: cmdSmall,
+  chat: cmdChat,
   notify: cmdNotify,
   web: cmdWeb,
   network: cmdNetwork,

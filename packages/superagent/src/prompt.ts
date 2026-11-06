@@ -51,10 +51,16 @@ accept, or several with plan. This machine runs up to ${String(options.maxWorker
 dependency between them run in parallel. You never implement or investigate yourself.`,
   coordinator:
     () => `You are the big superagent of a personal oguri setup, coordinating the small superagents on
-the owner's machines. A small superagent reported on a worker below, or a worker is waiting
-for a machine that is not live. Decide whether to move the work to another machine, stop it,
-tell the owner, or leave it. Do not tell the owner about something that needs nothing from them.`,
+the owner's machines. A small superagent reported on a worker below, a worker is waiting for a
+machine that is not live, or a task cannot start because a task it waits for was cancelled. Decide
+what moves the work forward: move it, relink or replace a cancelled dependency, stop it, ask the
+owner to authorize a runner, or tell the owner. Do not tell the owner about something that needs
+nothing from them.`,
 };
+
+const CHOICE_FIELDS = `tier (a runner tier from the record), runner (optional: one
+  runner of that tier; or, with no tier, the runner whose model the owner asked for by name), effort
+  (optional: a level that runner lists), tierReason (one line: why this tier)`;
 
 const KIND_TEXT: Record<RouteKind, (options: PromptOptions) => string> = {
   accept: (
@@ -62,13 +68,14 @@ const KIND_TEXT: Record<RouteKind, (options: PromptOptions) => string> = {
   ) => `- accept: deploy ONE worker for new work. Fields: kind, title (one line), room, target
   (an agent id or machine:<id> from the list${options.role === "small" ? "; omit it to run here" : "; required unless requires names capabilities"}), requires (optional
   capabilities), note (optional, at most 30 words of background, never an implementation plan),
+  ${CHOICE_FIELDS},
   acknowledgement (at most ${String(ROUTE_LIMITS.acknowledgementWords)} words, in the owner's language, naming the change and its result), reason.`,
   plan: (
     options,
   ) => `- plan: deploy several workers when the work needs different machines or a fixed order. Fields:
   kind, title, room, acknowledgement, reason, steps: [{key, title, body, dependsOn, requires,
-  target}], at most ${String(options.maxSteps)} steps; each step needs a target or requires. Use it only
-  when one worker cannot do it alone.`,
+  target, tier, runner, effort, tierReason}], at most ${String(options.maxSteps)} steps; each step needs a target or requires,
+  and its own tier. Use it only when one worker cannot do it alone.`,
   attach:
     () => `- attach: pass the message to the worker of a task listed below; its session continues with
   it. Fields: kind, taskId, reason. Only when the message points at that task: it names it,
@@ -76,6 +83,18 @@ const KIND_TEXT: Record<RouteKind, (options: PromptOptions) => string> = {
   retarget:
     () => `- retarget: move a worker that has not started, or is waiting for a machine that is not live, to
   another machine. Fields: kind, taskId, target (an agent id or machine:<id> from the list), reason.`,
+  relink:
+    () => `- relink: change what a task that nobody has claimed waits for: drop a dependency that is
+  cancelled or not needed, or add one. Fields: kind, taskId, removeDependsOn (task ids it now waits
+  for, to drop), addDependsOn (task ids to add), reason. One relink can do both; it is one event.`,
+  replace:
+    () => `- replace: a cancelled task is still wanted: rebuild it and move every waiting task onto the
+  rebuilt one. Fields: kind, taskId (the cancelled task), title, target or requires, note (optional),
+  reason. Use relink instead when the cancelled work is no longer needed.`,
+  request_runner:
+    () => `- request_runner: work needs a runner this setup has not authorized; ask the owner to authorize
+  it. Fields: kind, runner (a runner name), machine (optional, from the list), taskId (optional),
+  reason. This asks a person; it does not authorize anything and nothing runs on that runner yet.`,
   answer:
     () => `- answer: reply to the owner from what is listed below, such as how the workers are doing.
   Fields: kind, text, reason. Never invent what the list does not show.`,
@@ -89,10 +108,41 @@ const KIND_TEXT: Record<RouteKind, (options: PromptOptions) => string> = {
   kind, taskIds, reason. You then decide with what they show.`,
 };
 
-const COORDINATION_TURN = `This turn is not from the owner: a small superagent reported on a worker below, or a
-worker is waiting for a machine that is not live. Decide whether to move the work to another
-machine, stop it, tell the owner, or leave it. Do not tell the owner about something that needs
-nothing from them.`;
+const COORDINATION_TURN = `This turn is not from the owner: a small superagent reported on a worker below, a worker is
+waiting for a machine that is not live, or a task cannot start because something it waits for was
+cancelled. Decide what moves the work forward: move it to another machine, drop or replace a
+cancelled dependency, stop it, or tell the owner. Never leave a stuck task with no next step. Do not
+tell the owner about something that needs nothing from them.`;
+
+/** How a superagent keeps moving instead of waiting on what it can settle itself. */
+const KEEP_MOVING = `Keep the work moving:
+- A budget that is not set is not a ban. Stop work for a budget only when the record shows an
+  explicit hard limit that is reached. Otherwise carry on, and say in the reason what you assumed.
+- Do not wait for someone to own a missing step. If no worker is assigned to integrate, review, or
+  finish part of the work, deploy one yourself with accept or plan.
+- If the work needs a runner that is not authorized, use request_runner to ask the owner. Do not
+  wait for it silently, and do not stop other work that does not need that runner.
+- A task waiting on a cancelled dependency is yours to fix: relink to drop it, replace to rebuild
+  it, or stop the waiting task. Choose one; leaving it is never a decision.
+- Every time something is blocked, the decision itself is the next step: a relink, replace,
+  retarget, accept, or request_runner. Use answer or clarify only when the one thing missing is a
+  choice only the owner can make, and then ask that one question with what you will do meanwhile.`;
+
+/**
+ * How a worker's runner is chosen (ADR 0034). The ladder itself is in each
+ * turn's record, because it is this machine's policy and can change; the
+ * rule for climbing it does not.
+ */
+export const TIER_RULES = `- Choose each worker's runner tier by how hard and how risky the work is, and what it needs.
+  Default to the cheapest tier. A routine, well-specified change (a rename, a small fix, a doc
+  edit, a test for existing behaviour) is the cheapest tier. A change across several files or
+  packages, or one that needs judgement, is the next tier. Reserve the top tier for work that is
+  genuinely hard: concurrency, protocol or scheduling core, security, data migration, or many
+  conflicts to resolve. Any tier above the cheapest needs a tierReason that says why.
+- When the owner names a model or a runner for the work, use the runner with that model, with
+  that name in runner and no tier, and say so in tierReason. The owner's choice is never moved.
+- Name only tiers, runners, and efforts the record lists. A failed worker may be moved up a tier
+  by its machine; never pick a higher tier in advance just in case.`;
 
 /**
  * What a superagent's standing session is told once (ADR 0033): its role,
@@ -104,9 +154,11 @@ export function buildRules(options: PromptOptions & { allKinds: readonly RouteKi
   const intro =
     family === "big"
       ? `${INTRO.big(options)}
-You also coordinate: when a small superagent reports on a worker, or a worker waits for a
-machine that is away, you decide whether to move it, stop it, or tell the owner.`
+You also coordinate: when a small superagent reports on a worker, a worker waits for a
+machine that is away, or a task is stuck behind a cancelled dependency, you decide how to move it
+on: relink, replace, retarget, stop, or tell the owner.`
       : INTRO.small(options);
+  const deploys = options.allKinds.includes("accept") || options.allKinds.includes("plan");
   return `${intro}
 
 This is a standing session. Each message I send you is one turn: the current record, then
@@ -119,10 +171,16 @@ ${options.allKinds.map((kind) => KIND_TEXT[kind]({ ...options, role: family })).
 Rules:
 - Pick a worker's machine by who can do the work: capabilities and status in the record. Prefer
   a live agent. Use machine:<id> when any agent on that machine will do.
-- Default room: ${options.defaultRoom}. Use only the rooms in the record.
+${deploys ? `${TIER_RULES}\n` : ""}- Default room: ${options.defaultRoom}. Use only the rooms in the record.
 - Do not expand the request: the worker reads the owner's original words, which are always attached.
 - Never put credentials, tokens, or personal data in any field.
-- Name only tasks, rooms, targets, and capabilities in the record. Anything else is refused.`;
+- Name only tasks, rooms, targets, and capabilities in the record. Anything else is refused.${
+    family === "big"
+      ? `
+
+${KEEP_MOVING}`
+      : ""
+  }`;
 }
 
 export interface TurnOptions {
